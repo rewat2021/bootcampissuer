@@ -1,0 +1,104 @@
+﻿@model IssuerAPI.Models.AuthenUser;
+
+<html lang="th">
+<head>
+    <meta charset="UTF-8" />
+    <title>Login</title>
+    <link href="https://fontlibrary.org//face/thsarabun-new" rel="stylesheet" />
+
+    <style>
+        body {
+          margin: 0;
+          font-family: "THSarabunNewRegular", sans-serif;
+          background-color: #f5f5f5;
+        }
+
+        /* Top Bar */
+        .header {
+          background-color: #002887;
+          height: 60px;
+          width: 100%;
+        }
+
+        /* Container */
+        .container {
+          display: flex;
+          justify-content: center;
+          align-items: center;
+          height: calc(100vh - 60px);
+        }
+
+        /* Login Box */
+        .login-box {
+          width: 765px;
+          padding: 200px 40px 40px;
+          border: 4px solid #002887;
+          border-radius: 12px;
+          background: #ffff;
+          text-align: center;
+        }
+        .login-box label {
+          display: block;
+          width: 40%;
+          font-weight: bold;
+        }
+
+        /* Label */
+        .login-box label {
+          display: block;
+          margin-bottom: 6px;
+          font-size: 20px;
+          font-weight: bold;
+        }
+
+        /* Input */
+        input {
+          width: 70%;
+          padding: 12px;
+          border-radius: 20px;
+          border: 1px solid #ccc;
+          background-color: #0000001a;
+          margin-bottom: 20px;
+          outline: none;
+        }
+        /* Button */
+        .btn {
+          display: block;
+          margin: 0 auto;
+          background-color: #002887;
+          color: white;
+          border: none;
+          padding: 10px 30px;
+          border-radius: 20px;
+          cursor: pointer;
+        }
+        .btn:hover {
+          background-color: #002887;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="header"></div>
+
+     @using (Html.BeginForm(new { @class = "login100-form validate-form" }))
+     {
+        @Html.AntiForgeryToken()
+        <div class="container">
+            <div class="login-box">
+                <label>Username</label>
+                <input type="text" placeholder="Username" name="username" id="username" />
+
+                <button class="btn" type="submit">Login</button>
+            </div>
+        </div>
+     }
+    
+
+    @* <script>
+        function goNext() {
+          window.location.href = "qr.html";
+        }
+    </script> *@
+</body>
+</html>

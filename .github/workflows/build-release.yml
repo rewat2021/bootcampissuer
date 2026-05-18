@@ -1,0 +1,130 @@
+name: Build and Release Docker Images
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g. v1.0.0)'
+        required: true
+        default: 'v1.0.0'
+
+permissions:
+  contents: write
+
+jobs:
+  build-amd64:
+    name: Build linux/amd64
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build amd64 image
+        run: |
+          docker buildx build \
+            --platform linux/amd64 \
+            --tag issuer-api:amd64 \
+            --load \
+            .
+
+      - name: Save amd64 image
+        run: docker save issuer-api:amd64 | gzip > issuer-api-linux-amd64.tar.gz
+
+      - name: Upload amd64 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: issuer-api-linux-amd64
+          path: issuer-api-linux-amd64.tar.gz
+          retention-days: 1
+
+  build-arm64:
+    name: Build linux/arm64
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build arm64 image
+        run: |
+          docker buildx build \
+            --platform linux/arm64 \
+            --tag issuer-api:arm64 \
+            --load \
+            .
+
+      - name: Save arm64 image
+        run: docker save issuer-api:arm64 | gzip > issuer-api-linux-arm64.tar.gz
+
+      - name: Upload arm64 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: issuer-api-linux-arm64
+          path: issuer-api-linux-arm64.tar.gz
+          retention-days: 1
+
+  release:
+    name: Create GitHub Release
+    needs: [build-amd64, build-arm64]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download amd64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: issuer-api-linux-amd64
+
+      - name: Download arm64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: issuer-api-linux-arm64
+
+      - name: Get version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "VERSION=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "VERSION=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.VERSION }}
+          name: Release ${{ steps.version.outputs.VERSION }}
+          body: |
+            ## Docker Images
+
+            Download the image for your architecture and load it:
+
+            **Intel/AMD (x86_64):**
+            ```bash
+            docker load < issuer-api-linux-amd64.tar.gz
+            ```
+
+            **Apple Silicon / ARM (arm64):**
+            ```bash
+            docker load < issuer-api-linux-arm64.tar.gz
+            ```
+
+            Then run with docker-compose:
+            ```bash
+            docker-compose up -d
+            ```
+          files: |
+            issuer-api-linux-amd64.tar.gz
+            issuer-api-linux-arm64.tar.gz
+          generate_release_notes: false
