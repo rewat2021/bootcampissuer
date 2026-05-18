@@ -31,7 +31,7 @@ namespace IssuerAPI.Controllers
     public class ClaimDisplayInput
     {
         public string? Name { get; set; }
-        public string? Locale { get; set; }
+        //public string? Locale { get; set; }
     }
 
     public class AddFieldRequest
@@ -241,10 +241,10 @@ namespace IssuerAPI.Controllers
                 };
 
                 var displayArr = new JsonArray();
-                if (!string.IsNullOrEmpty(request.LabelEn))
-                    displayArr.Add(new JsonObject { ["name"] = request.LabelEn, ["locale"] = "en" });
-                if (!string.IsNullOrEmpty(request.LabelTh))
-                    displayArr.Add(new JsonObject { ["name"] = request.LabelTh, ["locale"] = "th" });
+                //if (!string.IsNullOrEmpty(request.LabelEn))
+                //    displayArr.Add(new JsonObject { ["name"] = request.LabelEn, ["locale"] = "en" });
+                //if (!string.IsNullOrEmpty(request.LabelTh))
+                //    displayArr.Add(new JsonObject { ["name"] = request.LabelTh, ["locale"] = "th" });
                 if (displayArr.Count > 0)
                     fieldNode["display"] = displayArr;
 
@@ -424,7 +424,7 @@ namespace IssuerAPI.Controllers
                     {
                         var dNode = new JsonObject();
                         if (!string.IsNullOrEmpty(d.Name)) dNode["name"] = d.Name;
-                        if (!string.IsNullOrEmpty(d.Locale)) dNode["locale"] = d.Locale;
+                       // if (!string.IsNullOrEmpty(d.Locale)) dNode["locale"] = d.Locale;
                         displayArr.Add(dNode);
                     }
                     fieldNode["display"] = displayArr;
