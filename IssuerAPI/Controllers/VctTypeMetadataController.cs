@@ -11,7 +11,10 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
 using Newtonsoft.Json;
+using System.Net.Http;
+using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Net.Http;
 
 namespace IssuerAPI.Controllers;
 
@@ -87,50 +90,91 @@ public class VctTypeMetadataController : ControllerBase
         return Ok(metadata);
     }
 
+    //[HttpGet("credentials/BootCampCredential")]
+    //[HttpGet(".well-known/vct/credentials/BootCampCredential")]
+    //[ProducesResponseType(typeof(VctTypeMetadata), StatusCodes.Status200OK)]
+    //public IActionResult GetBootCampCredential()
+    //{
+    //    var metadata = new VctTypeMetadata
+    //    {
+    //        Vct = $"{BASE}/credentials/BootCampCredential",
+    //        Name = "BootCampCredential",
+    //        Description = "Academic transcript issued by an educational institution",
+    //        Display =
+    //        [
+    //            new()
+    //            {
+    //                Lang        = "th",
+    //                Name        = "ใบแสดงผลการเรียน",
+    //                Description = "ใบแสดงผลการเรียนที่ออกโดยสถาบันการศึกษา",
+    //                Rendering   = new()
+    //                {
+    //                    Simple = new()
+    //                    {
+    //                        Logo            = new() { Uri = $"{BASE}/assets/transcript-logo.png", AltText = "Transcript Logo" },
+    //                        BackgroundColor = "#1a3c6e",
+    //                        TextColor       = "#ffffff",
+    //                    }
+    //                }
+    //            },
+    //            new() { Lang = "en", Name = "BootCamp" }
+    //        ],
+    //        Claims =
+    //        [
+    //            Claim("student_id",       mandatory: true,  sd: true,  th: "รหัสนักศึกษา",       en: "Student ID"),
+    //            Claim("full_name",        mandatory: true,  sd: true,  th: "ชื่อ-นามสกุล",       en: "Full Name"),
+    //            Claim("faculty",          mandatory: true,  sd: true,  th: "คณะ / สาขาวิชา",      en: "Faculty / Major"),
+    //            Claim("gpa",              mandatory: false, sd: true,  th: "เกรดเฉลี่ย",          en: "GPA"),
+    //            //Claim("grades",           mandatory: false, sd: true,  th: "ผลการเรียน",          en: "Grades"),
+    //            Claim("graduation_date",  mandatory: false, sd: true,  th: "วันสำเร็จการศึกษา",   en: "Graduation Date"),
+    //            Claim("institution_name", mandatory: true,  sd: false, th: "ชื่อสถาบัน",          en: "Institution Name"),
+    //            Claim("degree",           mandatory: true,  sd: true,  th: "วุฒิการศึกษา",        en: "Degree / Qualification"),
+    //        ]
+    //    };
+
+    //    return Ok(metadata);
+    //}
+
     [HttpGet("credentials/BootCampCredential")]
     [HttpGet(".well-known/vct/credentials/BootCampCredential")]
-    [ProducesResponseType(typeof(VctTypeMetadata), StatusCodes.Status200OK)]
-    public IActionResult GetBootCampCredential()
+    public async Task<IActionResult> GetBootCampCredential()
     {
+        // ดึง claims จาก openid-credential-issuer
+        // ดึง base URL จาก request ปัจจุบัน
+        var baseUrl = $"{Request.Scheme}://{Request.Host}";
+        HttpClient httpClient = new HttpClient();
+        var issuerMetadata = await httpClient.GetFromJsonAsync<JsonDocument>(
+            $"{baseUrl}/.well-known/openid-credential-issuer");
+    
+        // หยิบ claims ของ BootCampCredential_dc+sd-jwt
+            var claimsJson = issuerMetadata.RootElement
+            .GetProperty("credential_configurations_supported")
+            .GetProperty("BootCampCredential_dc+sd-jwt")
+            .GetProperty("claims");
+
+        // แปลงเป็น VctClaim list
+        var claims = claimsJson.EnumerateArray().Select(c => Claim(
+            path: c.GetProperty("path")[0].GetString(),
+            mandatory: c.GetProperty("mandatory").GetBoolean(),
+            sd: c.GetProperty("sd").GetBoolean(),
+            th: c.GetProperty("display").EnumerateArray()
+                        .FirstOrDefault(d => d.GetProperty("locale").GetString() == "th")
+                        .GetProperty("name").GetString(),
+            en: c.GetProperty("display").EnumerateArray()
+                        .FirstOrDefault(d => d.GetProperty("locale").GetString() == "en")
+                        .GetProperty("name").GetString() ?? ""
+        )).ToList();
+
         var metadata = new VctTypeMetadata
         {
             Vct = $"{BASE}/credentials/BootCampCredential",
             Name = "BootCampCredential",
-            Description = "Academic transcript issued by an educational institution",
-            Display =
-            [
-                new()
-                {
-                    Lang        = "th",
-                    Name        = "ใบแสดงผลการเรียน",
-                    Description = "ใบแสดงผลการเรียนที่ออกโดยสถาบันการศึกษา",
-                    Rendering   = new()
-                    {
-                        Simple = new()
-                        {
-                            Logo            = new() { Uri = $"{BASE}/assets/transcript-logo.png", AltText = "Transcript Logo" },
-                            BackgroundColor = "#1a3c6e",
-                            TextColor       = "#ffffff",
-                        }
-                    }
-                },
-                new() { Lang = "en", Name = "BootCamp" }
-            ],
-            Claims =
-            [
-                Claim("student_id",       mandatory: true,  sd: true,  th: "รหัสนักศึกษา",       en: "Student ID"),
-                Claim("full_name",        mandatory: true,  sd: true,  th: "ชื่อ-นามสกุล",       en: "Full Name"),
-                Claim("faculty",          mandatory: true,  sd: true,  th: "คณะ / สาขาวิชา",      en: "Faculty / Major"),
-                Claim("gpa",              mandatory: false, sd: true,  th: "เกรดเฉลี่ย",          en: "GPA"),
-                //Claim("grades",           mandatory: false, sd: true,  th: "ผลการเรียน",          en: "Grades"),
-                Claim("graduation_date",  mandatory: false, sd: true,  th: "วันสำเร็จการศึกษา",   en: "Graduation Date"),
-                Claim("institution_name", mandatory: true,  sd: false, th: "ชื่อสถาบัน",          en: "Institution Name"),
-                Claim("degree",           mandatory: true,  sd: true,  th: "วุฒิการศึกษา",        en: "Degree / Qualification"),
-            ]
+            Claims = claims
         };
 
         return Ok(metadata);
     }
+
 
     // ----------------------------------------------------------
     // GET /credentials/IDCard
