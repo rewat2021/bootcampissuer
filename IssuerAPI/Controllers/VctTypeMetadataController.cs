@@ -143,66 +143,89 @@ public class VctTypeMetadataController : ControllerBase
         {
             var baseUrl = $"{Request.Scheme}://{Request.Host}";
             HttpClient httpClient = new HttpClient();
-            var issuerMetadata = await httpClient.GetFromJsonAsync<JsonDocument>(
+
+            var response = await httpClient.GetStringAsync(
                 $"{baseUrl}/.well-known/openid-credential-issuer");
 
-            if (issuerMetadata == null)
-                return StatusCode(500, new { error = "Cannot fetch issuer metadata" });
+            // parse ด้วย JsonNode เพื่อรองรับ key ที่มี + และ unicode
+            var root = JsonNode.Parse(response);
 
-            if (!issuerMetadata.RootElement.TryGetProperty("credential_configurations_supported", out var configurations))
+            if (root == null)
+                return StatusCode(500, new { error = "Cannot parse issuer metadata" });
+
+            var configurations = root["credential_configurations_supported"]?.AsObject();
+            if (configurations == null)
                 return StatusCode(500, new { error = "credential_configurations_supported not found" });
 
-            JsonElement credentialConfig = default;
-            bool found = false;
-            foreach (var config in configurations.EnumerateObject())
+            // หา key ที่มี BootCampCredential
+            JsonNode? credentialConfig = null;
+            foreach (var (key, value) in configurations)
             {
-                if (config.Name.StartsWith("BootCampCredential"))
+                if (key.Contains("BootCampCredential", StringComparison.OrdinalIgnoreCase))
                 {
-                    credentialConfig = config.Value;
-                    found = true;
+                    credentialConfig = value;
                     break;
                 }
             }
 
-            if (!found)
+            if (credentialConfig == null)
                 return NotFound(new { error = "BootCampCredential not found" });
 
-            // ── Claims (Array) ────────────────────────────────────
             var claims = new List<ClaimMetadata>();
-            if (credentialConfig.TryGetProperty("claims", out var claimsJson)
-                && claimsJson.ValueKind == JsonValueKind.Array)
+            var claimsNode = credentialConfig["claims"];
+
+            if (claimsNode is JsonObject claimsObj)
             {
-                foreach (var c in claimsJson.EnumerateArray())
+                // Object: { "fullname": { "mandatory": true, ... } }
+                foreach (var (fieldName, fieldValue) in claimsObj)
                 {
-                    string path = "";
-                    if (c.TryGetProperty("path", out var pathProp)
-                        && pathProp.ValueKind == JsonValueKind.Array
-                        && pathProp.GetArrayLength() > 0)
+                    bool mandatory = fieldValue?["mandatory"]?.GetValue<bool>() ?? true;
+                    bool sd = fieldValue?["sd"]?.GetValue<bool>() ?? true;
+
+                    string th = fieldName;
+                    string en = fieldName;
+
+                    if (fieldValue?["display"] is JsonArray displayArr)
                     {
-                        path = pathProp[0].GetString() ?? "";
+                        foreach (var d in displayArr)
+                        {
+                            string? locale = d?["locale"]?.GetValue<string>();
+                            string? name = d?["name"]?.GetValue<string>();
+                            if (name == null) continue;
+
+                            if (locale == "th") th = name;
+                            if (locale == "en") en = name;
+                        }
                     }
 
-                    bool mandatory = true;
-                    if (c.TryGetProperty("mandatory", out var mandatoryProp))
-                        mandatory = mandatoryProp.GetBoolean();
+                    claims.Add(Claim(fieldName, mandatory: mandatory, sd: sd, th: th, en: en));
+                }
+            }
+            else if (claimsNode is JsonArray claimsArr)
+            {
+                // Array: [ { "path": ["fullname"], ... } ]
+                foreach (var c in claimsArr)
+                {
+                    string path = "";
+                    if (c?["path"] is JsonArray pathArr && pathArr.Count > 0)
+                        path = pathArr[0]?.GetValue<string>() ?? "";
 
-                    bool sd = true;
-                    if (c.TryGetProperty("sd", out var sdProp))
-                        sd = sdProp.GetBoolean();
+                    bool mandatory = c?["mandatory"]?.GetValue<bool>() ?? true;
+                    bool sd = c?["sd"]?.GetValue<bool>() ?? true;
 
-                    string th = "";
+                    string th = path;
                     string en = path;
 
-                    if (c.TryGetProperty("display", out var displayProp)
-                        && displayProp.ValueKind == JsonValueKind.Array)
+                    if (c?["display"] is JsonArray displayArr)
                     {
-                        foreach (var d in displayProp.EnumerateArray())
+                        foreach (var d in displayArr)
                         {
-                            if (!d.TryGetProperty("locale", out var loc)) continue;
-                            if (!d.TryGetProperty("name", out var nm)) continue;
+                            string? locale = d?["locale"]?.GetValue<string>();
+                            string? name = d?["name"]?.GetValue<string>();
+                            if (name == null) continue;
 
-                            if (loc.GetString() == "th") th = nm.GetString() ?? "";
-                            if (loc.GetString() == "en") en = nm.GetString() ?? "";
+                            if (locale == "th") th = name;
+                            if (locale == "en") en = name;
                         }
                     }
 
@@ -210,7 +233,6 @@ public class VctTypeMetadataController : ControllerBase
                 }
             }
 
-            // ── ใช้ pattern เดียวกับ GetTranscriptCredential ──────
             var metadata = new VctTypeMetadata
             {
                 Vct = $"{BASE}/credentials/BootCampCredential",
@@ -231,6 +253,7 @@ public class VctTypeMetadataController : ControllerBase
             return StatusCode(500, new { error = ex.Message, stackTrace = ex.StackTrace });
         }
     }
+
 
 
     // ----------------------------------------------------------
