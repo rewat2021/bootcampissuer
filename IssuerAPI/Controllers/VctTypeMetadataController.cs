@@ -139,40 +139,97 @@ public class VctTypeMetadataController : ControllerBase
     [HttpGet(".well-known/vct/credentials/BootCampCredential")]
     public async Task<IActionResult> GetBootCampCredential()
     {
-        // ดึง claims จาก openid-credential-issuer
-        // ดึง base URL จาก request ปัจจุบัน
-        var baseUrl = $"{Request.Scheme}://{Request.Host}";
-        HttpClient httpClient = new HttpClient();
-        var issuerMetadata = await httpClient.GetFromJsonAsync<JsonDocument>(
-            $"{baseUrl}/.well-known/openid-credential-issuer");
-    
-        // หยิบ claims ของ BootCampCredential_dc+sd-jwt
-            var claimsJson = issuerMetadata.RootElement
-            .GetProperty("credential_configurations_supported")
-            .GetProperty("BootCampCredential_dc+sd-jwt")
-            .GetProperty("claims");
-
-        // แปลงเป็น VctClaim list
-        var claims = claimsJson.EnumerateArray().Select(c => Claim(
-            path: c.GetProperty("path")[0].GetString(),
-            mandatory: c.GetProperty("mandatory").GetBoolean(),
-            sd: c.GetProperty("sd").GetBoolean(),
-            th: c.GetProperty("display").EnumerateArray()
-                        .FirstOrDefault(d => d.GetProperty("locale").GetString() == "th")
-                        .GetProperty("name").GetString(),
-            en: c.GetProperty("display").EnumerateArray()
-                        .FirstOrDefault(d => d.GetProperty("locale").GetString() == "en")
-                        .GetProperty("name").GetString() ?? ""
-        )).ToList();
-
-        var metadata = new VctTypeMetadata
+        try
         {
-            Vct = $"{BASE}/credentials/BootCampCredential",
-            Name = "BootCampCredential",
-            Claims = claims
-        };
+            var baseUrl = $"{Request.Scheme}://{Request.Host}";
+            HttpClient httpClient = new HttpClient();
+            var issuerMetadata = await httpClient.GetFromJsonAsync<JsonDocument>(
+                $"{baseUrl}/.well-known/openid-credential-issuer");
 
-        return Ok(metadata);
+            if (issuerMetadata == null)
+                return StatusCode(500, new { error = "Cannot fetch issuer metadata" });
+
+            if (!issuerMetadata.RootElement.TryGetProperty("credential_configurations_supported", out var configurations))
+                return StatusCode(500, new { error = "credential_configurations_supported not found" });
+
+            JsonElement credentialConfig = default;
+            bool found = false;
+            foreach (var config in configurations.EnumerateObject())
+            {
+                if (config.Name.StartsWith("BootCampCredential"))
+                {
+                    credentialConfig = config.Value;
+                    found = true;
+                    break;
+                }
+            }
+
+            if (!found)
+                return NotFound(new { error = "BootCampCredential not found" });
+
+            // ── Claims (Array) ────────────────────────────────────
+            var claims = new List<ClaimMetadata>();
+            if (credentialConfig.TryGetProperty("claims", out var claimsJson)
+                && claimsJson.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var c in claimsJson.EnumerateArray())
+                {
+                    string path = "";
+                    if (c.TryGetProperty("path", out var pathProp)
+                        && pathProp.ValueKind == JsonValueKind.Array
+                        && pathProp.GetArrayLength() > 0)
+                    {
+                        path = pathProp[0].GetString() ?? "";
+                    }
+
+                    bool mandatory = true;
+                    if (c.TryGetProperty("mandatory", out var mandatoryProp))
+                        mandatory = mandatoryProp.GetBoolean();
+
+                    bool sd = true;
+                    if (c.TryGetProperty("sd", out var sdProp))
+                        sd = sdProp.GetBoolean();
+
+                    string th = "";
+                    string en = path;
+
+                    if (c.TryGetProperty("display", out var displayProp)
+                        && displayProp.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (var d in displayProp.EnumerateArray())
+                        {
+                            if (!d.TryGetProperty("locale", out var loc)) continue;
+                            if (!d.TryGetProperty("name", out var nm)) continue;
+
+                            if (loc.GetString() == "th") th = nm.GetString() ?? "";
+                            if (loc.GetString() == "en") en = nm.GetString() ?? "";
+                        }
+                    }
+
+                    claims.Add(Claim(path, mandatory: mandatory, sd: sd, th: th, en: en));
+                }
+            }
+
+            // ── ใช้ pattern เดียวกับ GetTranscriptCredential ──────
+            var metadata = new VctTypeMetadata
+            {
+                Vct = $"{BASE}/credentials/BootCampCredential",
+                Name = "BootCampCredential",
+                Description = "BootCamp Credential",
+                Display =
+                [
+                    new() { Lang = "en", Name = "BootCamp" },
+                new() { Lang = "th", Name = "BootCamp" }
+                ],
+                Claims = claims
+            };
+
+            return Ok(metadata);
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { error = ex.Message, stackTrace = ex.StackTrace });
+        }
     }
 
 
