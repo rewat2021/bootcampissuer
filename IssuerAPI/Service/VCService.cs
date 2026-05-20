@@ -1,4 +1,5 @@
-﻿using Microsoft.AspNetCore.Mvc;
+﻿using IssuerAPI.Models;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.IdentityModel.Tokens;
 using NSec.Cryptography;
@@ -8,15 +9,15 @@ using Org.BouncyCastle.Crypto.Parameters;
 using Org.BouncyCastle.Crypto.Signers;
 using Org.BouncyCastle.OpenSsl;
 using Org.BouncyCastle.Security;
+using QRCoder;
 using SimpleBase;
 using System.IdentityModel.Tokens.Jwt;
 using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
-using IssuerAPI.Models;
-using QRCoder;
 
 
 namespace IssuerAPI.Service
@@ -1491,6 +1492,22 @@ namespace IssuerAPI.Service
                 .Replace('+', '-')
                 .Replace('/', '_')
                 .TrimEnd('=');
+        }
+
+        public async Task<JsonNode> LoadCredentialConfigurationsAsync(IWebHostEnvironment _env, string baseUrl)
+        {
+            Oid4VciOptions _options = new Oid4VciOptions();
+            var filePath = Path.Combine(_env.ContentRootPath, _options.CredentialConfigurationsFile);
+
+            if (!System.IO.File.Exists(filePath))
+            {
+                return new JsonObject();
+            }
+
+            var json = await System.IO.File.ReadAllTextAsync(filePath);
+            json = json.Replace("{IssuerUrl}", baseUrl);
+            var node = JsonNode.Parse(json);
+            return node ?? new JsonObject();
         }
 
     }

@@ -49,10 +49,10 @@ namespace IssuerAPI.Controllers
         public async Task<IActionResult> ReadJsonAsync()
         {
             var baseUrl = GetBaseUrl(HttpContext);
+            VCService vcServ = new VCService();
 
-           
 
-            var credentialConfigurations = await LoadCredentialConfigurationsAsync(baseUrl);
+            var credentialConfigurations = await vcServ.LoadCredentialConfigurationsAsync(_env, baseUrl); //await LoadCredentialConfigurationsAsync(baseUrl);
 
             var response = new JsonObject
             {
