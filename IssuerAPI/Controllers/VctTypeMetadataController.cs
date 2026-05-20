@@ -141,27 +141,24 @@ public class VctTypeMetadataController : ControllerBase
     {
         try
         {
-            var baseUrl = $"{Request.Scheme}://{Request.Host}";
-            HttpClient httpClient = new HttpClient();
+            var configPath = Path.Combine(_env.ContentRootPath, "openid-credential-issuer.json");
 
-            var response = await httpClient.GetStringAsync(
-                $"{baseUrl}/.well-known/openid-credential-issuer");
+            if (!System.IO.File.Exists(configPath))
+                return StatusCode(500, new { error = $"File not found: {configPath}" });
 
-            // parse ด้วย JsonNode เพื่อรองรับ key ที่มี + และ unicode
-            var root = JsonNode.Parse(response);
+            var json = await System.IO.File.ReadAllTextAsync(configPath);
+            var root = JsonNode.Parse(json);
 
-            if (root == null)
-                return StatusCode(500, new { error = "Cannot parse issuer metadata" });
-
-            var configurations = root["credential_configurations_supported"]?.AsObject();
+            var configurations = root?["credential_configurations_supported"]?.AsObject();
             if (configurations == null)
                 return StatusCode(500, new { error = "credential_configurations_supported not found" });
 
-            // หา key ที่มี BootCampCredential
+            // หา BootCampCredential_dc+sd-jwt
             JsonNode? credentialConfig = null;
             foreach (var (key, value) in configurations)
             {
-                if (key.Contains("BootCampCredential", StringComparison.OrdinalIgnoreCase))
+                if (key.Contains("BootCampCredential", StringComparison.OrdinalIgnoreCase)
+                    && key.Contains("dc+sd-jwt", StringComparison.OrdinalIgnoreCase))
                 {
                     credentialConfig = value;
                     break;
@@ -169,14 +166,14 @@ public class VctTypeMetadataController : ControllerBase
             }
 
             if (credentialConfig == null)
-                return NotFound(new { error = "BootCampCredential not found" });
+                return NotFound(new { error = "BootCampCredential_dc+sd-jwt not found" });
 
             var claims = new List<ClaimMetadata>();
             var claimsNode = credentialConfig["claims"];
 
+            // Object: { "fullname": { "mandatory": true, ... } }
             if (claimsNode is JsonObject claimsObj)
             {
-                // Object: { "fullname": { "mandatory": true, ... } }
                 foreach (var (fieldName, fieldValue) in claimsObj)
                 {
                     bool mandatory = fieldValue?["mandatory"]?.GetValue<bool>() ?? true;
@@ -191,8 +188,7 @@ public class VctTypeMetadataController : ControllerBase
                         {
                             string? locale = d?["locale"]?.GetValue<string>();
                             string? name = d?["name"]?.GetValue<string>();
-                            if (name == null) continue;
-
+                            if (name == null || name == "string") continue; // skip placeholder
                             if (locale == "th") th = name;
                             if (locale == "en") en = name;
                         }
@@ -201,9 +197,9 @@ public class VctTypeMetadataController : ControllerBase
                     claims.Add(Claim(fieldName, mandatory: mandatory, sd: sd, th: th, en: en));
                 }
             }
+            // Array: [ { "path": ["student_id"], ... } ]
             else if (claimsNode is JsonArray claimsArr)
             {
-                // Array: [ { "path": ["fullname"], ... } ]
                 foreach (var c in claimsArr)
                 {
                     string path = "";
@@ -222,8 +218,7 @@ public class VctTypeMetadataController : ControllerBase
                         {
                             string? locale = d?["locale"]?.GetValue<string>();
                             string? name = d?["name"]?.GetValue<string>();
-                            if (name == null) continue;
-
+                            if (name == null || name == "string") continue; // skip placeholder
                             if (locale == "th") th = name;
                             if (locale == "en") en = name;
                         }
