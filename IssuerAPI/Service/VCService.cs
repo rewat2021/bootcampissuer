@@ -1362,6 +1362,16 @@ namespace IssuerAPI.Service
                     sdFlags[fieldName] = isSd;
                 }
             }
+            else if (claimsNode is System.Text.Json.Nodes.JsonObject claimsObj)
+            {
+                // format ปัจจุบัน: {"full_name": {"mandatory": true, "sd": true}, ...}
+                foreach (var (fieldName, claimNode) in claimsObj)
+                {
+                    bool isSd = claimNode?["sd"]?.GetValue<bool>() ?? true;
+                    mockData[fieldName] = $"[{fieldName}]";
+                    sdFlags[fieldName] = isSd;
+                }
+            }
 
             // ── 4. แยก SD claims และ Non-SD claims ───────────────────
             var sdClaims = new Dictionary<string, object>();

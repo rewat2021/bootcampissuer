@@ -37,9 +37,8 @@ namespace IssuerAPI.Services
 
                 string json   = File.ReadAllText(path);
                 var    config = JsonNode.Parse(json)?.AsObject();
-                var    cs     = config?["credential_configurations_supported"]?.AsObject();
 
-                return cs?[credentialType]?["claims"]?.AsObject();
+                return config?[credentialType]?["claims"]?.AsObject();
             }
             catch (Exception ex)
             {

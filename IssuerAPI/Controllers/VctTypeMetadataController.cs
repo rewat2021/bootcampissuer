@@ -239,8 +239,22 @@ public class VctTypeMetadataController : ControllerBase
                 Description = "BootCamp Credential",
                 Display =
                 [
-                    new() { Lang = "en", Name = "BootCamp" },
-                new() { Lang = "th", Name = "BootCamp" }
+                    new()
+                    {
+                        Lang        = "th",
+                        Name        = "ใบแสดงผลการเรียน",
+                        Description = "ใบแสดงผลการเรียนที่ออกโดยสถาบันการศึกษา",
+                        Rendering   = new()
+                        {
+                            Simple = new()
+                            {
+                                Logo            = new() { Uri = $"{BASE}/assets/transcript-logo.png", AltText = "Transcript Logo" },
+                                BackgroundColor = "#1a3c6e",
+                                TextColor       = "#ffffff",
+                            }
+                        }
+                    },
+                    new() { Lang = "en", Name = "Academic Transcript" }
                 ],
                 Claims = claims
             };
