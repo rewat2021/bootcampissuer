@@ -141,7 +141,9 @@ public class VctTypeMetadataController : ControllerBase
     {
         try
         {
-            var configPath = Path.Combine(_env.ContentRootPath, "openid-credential-issuer.json");
+            // ใช้ path จาก options (App_Data/credential-configurations-supported.json)
+            // Path.Combine รองรับทั้ง Windows (\) และ Linux/Mac (/) โดยอัตโนมัติ
+            var configPath = Path.Combine(_env.ContentRootPath, _options.CredentialConfigurationsFile);
 
             if (!System.IO.File.Exists(configPath))
                 return StatusCode(500, new { error = $"File not found: {configPath}" });
@@ -149,9 +151,10 @@ public class VctTypeMetadataController : ControllerBase
             var json = await System.IO.File.ReadAllTextAsync(configPath);
             var root = JsonNode.Parse(json);
 
-            var configurations = root?["credential_configurations_supported"]?.AsObject();
+            // credential-configurations-supported.json มี key อยู่ที่ root โดยตรง
+            var configurations = root?.AsObject();
             if (configurations == null)
-                return StatusCode(500, new { error = "credential_configurations_supported not found" });
+                return StatusCode(500, new { error = "Cannot parse credential-configurations-supported.json" });
 
             // หา BootCampCredential_dc+sd-jwt
             JsonNode? credentialConfig = null;
