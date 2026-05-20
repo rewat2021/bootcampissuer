@@ -168,6 +168,7 @@ public class VctTypeMetadataController : ControllerBase
                 }
             }
 
+
             if (credentialConfig == null)
                 return NotFound(new { error = "BootCampCredential_dc+sd-jwt not found" });
 
