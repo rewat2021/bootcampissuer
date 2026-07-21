@@ -1,12 +1,12 @@
 ﻿
 using IssuerAPI.Models;
 using Microsoft.AspNetCore.HttpOverrides;
-using Microsoft.Extensions.Options;
 using Microsoft.OpenApi.Models;
 using NLog;
 using NLog.Web;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Microsoft.AspNetCore.Authentication.Cookies;
 
 var logger = LogManager.Setup()
                        .LoadConfigurationFromFile("nlog.config")
@@ -59,19 +59,46 @@ builder.Services.Configure<ForwardedHeadersOptions>(options =>
     options.KnownProxies.Clear();
 });
 
-builder.Services.AddAuthentication("IssuerCookie")
-    .AddCookie("IssuerCookie", options =>
+//builder.Services.AddAuthentication("IssuerCookie")
+//    .AddCookie("IssuerCookie", options =>
+//    {
+//        options.LoginPath = "/Account/Login"; // ถ้าไม่ login จะ redirect มานี่
+//    });
+builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
+    .AddCookie(options =>
     {
-        options.LoginPath = "/Account/Login"; // ถ้าไม่ login จะ redirect มานี่
+        options.LoginPath = "/Account/Login";
+        options.LogoutPath = "/Account/Logout";
+        options.AccessDeniedPath = "/Account/AccessDenied";
+        options.ExpireTimeSpan = TimeSpan.FromMinutes(60);
+        options.SlidingExpiration = true;
+        options.Cookie.HttpOnly = true;
+        options.Cookie.SecurePolicy = CookieSecurePolicy.SameAsRequest; // ใช้ Always ถ้าบังคับ HTTPS
     });
 
-builder.Services.AddControllers()
+builder.Services.AddControllersWithViews()
     .AddJsonOptions(opts =>
     {
         opts.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter());
         opts.JsonSerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower;
         opts.JsonSerializerOptions.DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull;
     });
+
+var AllowSpecificOriginWithCredentials = "AllowSpecificOriginWithCredentials";
+builder.Services.AddCors(options =>
+{
+
+    options.AddPolicy(AllowSpecificOriginWithCredentials,
+                policy =>
+                {
+                    policy.WithOrigins(new string[] { "https://wallet-test.etda.or.th", "https://issuer-cu-test.etda.or.th", "https://issuer.zenithcomp.co.th",
+                        "https://vc-testtool.etda.or.th", "https://vc-testtool-test.etda.or.th" }) // Replace with your allowed origins
+                           .AllowAnyHeader()
+                           .AllowAnyMethod();
+                    //.AllowCredentials(); // This enables Access-Control-Allow-Credentials
+                });
+
+});
 
 builder.Services.AddDistributedMemoryCache();
 builder.Services.AddSession();
@@ -101,24 +128,17 @@ app.UseStaticFiles();
 app.UseRouting();
 
 app.UseSession();
+app.UseCors(AllowSpecificOriginWithCredentials);
 
 app.UseAuthentication();   // 🔥 ต้องมาก่อน Authorization
 app.UseAuthorization();
 
 
-// แทนที่ block เดิมที่ใช้ Redirect
-//app.MapGet("/.well-known/vct/credentials/{type}", async (string type, HttpContext ctx) =>
-//{
-//    var baseUrl = $"{ctx.Request.Scheme}://{ctx.Request.Host}";
 
-//    // forward request ไปที่ path /credentials/{type} โดยตรง
-//    ctx.Request.Path = $"/credentials/{type}";
-//    ctx.Request.RouteValues["type"] = type;
 
-//    // เรียก controller endpoint โดยตรง ไม่ redirect
-//    var dispatcher = ctx.RequestServices.GetRequiredService<IHttpContextFactory>();
-//    await ctx.Response.SendFileAsync(""); // ไม่ใช้วิธีนี้
-//});
+app.MapControllerRoute(
+    name: "default",
+    pattern: "{controller=Account}/{action=Login}");
 
 app.MapControllers();
 

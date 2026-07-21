@@ -7,12 +7,17 @@
           href="https://fontlibrary.org//face/thsarabun-new"
           type="text/css" />
     <style>
+        html, body {
+            height: 100%;
+        }
+
         body {
             margin: 0;
             font-family: "THSarabunNewRegular", sans-serif;
             background-color: #ffffff;
+            display: flex;
+            flex-direction: column;
         }
-
         /* Header */
         .header {
             background-color: #002887;
@@ -31,23 +36,24 @@
         .sub-text {
             font-size: 18px;
         }
-
         /* Main Box */
         .container {
+            flex: 1;
             display: flex;
             justify-content: center;
-            margin-top: 70px;
+            align-items: center;
         }
 
         .card {
             width: 1200px;
+            max-width: 90vw;
             background: white;
             border: 4px solid #002887;
             border-radius: 12px;
             padding: 30px;
             display: flex;
             justify-content: center;
-            align-items: flex-start;
+            align-items: center;
             gap: 150px;
         }
 
@@ -55,6 +61,7 @@
             text-align: center;
             color: #002887;
             font-size: 30px;
+            margin: 0 auto;
         }
 
             .qr-section img {
@@ -62,7 +69,7 @@
             }
 
         .credential {
-            width: 600px;
+            width: 0;
         }
 
             .credential h3 {
@@ -87,28 +94,25 @@
     <!-- Header -->
     <div class="header">
         <div>
-           @*  <div class="header-text">กรมการปกครอง</div>
-            <div class="sub-text">Department of Provincial Administration</div> *@
+            <div class="header-text">เอกสาร Standard VC</div>
+            @* <div class="sub-text">Department of Provincial Administration</div> *@
         </div>
     </div>
-
     <!-- Content -->
     <div class="container">
         <div class="card">
             <div class="qr-section">
                 <img id="qr" style="width:250px;" />
-                <p><b>QR Code</b></p>
+                <p><b>กรุณาสแกน QR ด้วย Digital Wallet</b></p>
             </div>
-
             <div class="credential">
-               @*  <h3>Credential Offer</h3>
+                @*  <h3>Credential Offer</h3>
                 <div class="credential-box">
                     openid-credential-offer://vc-testtool.etda.or.th/?credential_offer_uri=https://vc-testtool.etda.or.th/openid4vc/credentialOffer?id=example
                 </div> *@
             </div>
         </div>
     </div>
-
     <script>
         async function getQR() {
             const res = await fetch('/credential-offer', {
@@ -117,18 +121,14 @@
                 headers: {
                     'Content-Type': 'application/json'
                 },
-                body: JSON.stringify({ documentType: "Transcript" })
+                body: JSON.stringify({ document_type: "Transcript" })
             });
-
             const data = await res.json();
             console.log(data);
+            console.log(data.qr_text);
             document.getElementById("qr").src =
-                "data:image/png;base64," + data.qrText;
+                "data:image/png;base64," + data.qr_text;
         }
     </script>
-
 </body>
-
-
-
 </html>

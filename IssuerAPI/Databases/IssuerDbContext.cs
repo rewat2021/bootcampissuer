@@ -22,17 +22,13 @@ public partial class IssuerDbContext : DbContext
 
     public virtual DbSet<Dbrequest> Dbrequests { get; set; }
 
-    public virtual DbSet<User> Users { get; set; }
+    public virtual DbSet<Dbuser> Dbusers { get; set; }
 
     protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
     {
-        if (!optionsBuilder.IsConfigured)
-        {
-            var connStr = Environment.GetEnvironmentVariable("CONNECTION_STRING")
-                ?? "server=localhost;port=3306;database=issuer;user=root;password=P@ssw0rd@1234;sslmode=None";
-            optionsBuilder.UseMySql(connStr, ServerVersion.AutoDetect(connStr));
-            //optionsBuilder.UseMySql("server=192.100.10.46;port=3306;database=issuer;user=root;password=P@ssw0rd@1234", Microsoft.EntityFrameworkCore.ServerVersion.Parse("8.0.45-mysql"));
-        }
+        var connStr = Environment.GetEnvironmentVariable("CONNECTION_STRING")
+            ?? "server=192.100.10.46;port=3306;database=issuer;user=root;password=P@ssw0rd@1234;sslmode=None";
+        optionsBuilder.UseMySql(connStr, Microsoft.EntityFrameworkCore.ServerVersion.Parse("8.0.45-mysql"));
     }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
@@ -111,20 +107,18 @@ public partial class IssuerDbContext : DbContext
 
             entity.Property(e => e.Id).HasColumnName("ID");
             entity.Property(e => e.CreateDate).HasMaxLength(6);
-            entity.Property(e => e.CredentialId)
-                .HasMaxLength(50)
-                .IsFixedLength();
+            entity.Property(e => e.CredentialId).HasMaxLength(1000);
             entity.Property(e => e.RegisterId)
                 .HasMaxLength(50)
                 .IsFixedLength()
                 .HasColumnName("RegisterID");
         });
 
-        modelBuilder.Entity<User>(entity =>
+        modelBuilder.Entity<Dbuser>(entity =>
         {
             entity.HasKey(e => e.Id).HasName("PRIMARY");
 
-            entity.ToTable("users");
+            entity.ToTable("dbusers");
 
             entity.HasIndex(e => e.Email, "email").IsUnique();
 

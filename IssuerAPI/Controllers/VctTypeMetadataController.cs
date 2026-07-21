@@ -304,11 +304,11 @@ public class VctTypeMetadataController : ControllerBase
             Claims =
             [
                 Claim("id_number",   mandatory: true,  sd: true,  th: "เลขบัตรประชาชน", en: "ID Number"),
-                Claim("full_name",   mandatory: true,  sd: true,  th: "ชื่อ-นามสกุล",   en: "Full Name"),
+                Claim("full_name",   mandatory: true,  sd: true,  th: "ชื่อ-นามสกุล",     en: "Full Name"),
                 Claim("birthdate",   mandatory: true,  sd: true,  th: "วันเกิด",         en: "Date of Birth"),
-                Claim("address",     mandatory: false, sd: false, th: "ที่อยู่",          en: "Address"),
+                Claim("address",     mandatory: true, sd: true, th: "ที่อยู่",          en: "Address"),
                 Claim("expiry_date", mandatory: true,  sd: true,  th: "วันหมดอายุ",      en: "Expiry Date"),
-                Claim("nationality", mandatory: true,  sd: true,  th: "สัญชาติ",         en: "Nationality"),
+                Claim("religion", mandatory: true,  sd: true,  th: "ศาสนา",         en: "Religion"),
                 Claim("photo",       mandatory: false, sd: true,  th: "รูปถ่าย",          en: "Photo"),
             ]
         };
@@ -319,7 +319,7 @@ public class VctTypeMetadataController : ControllerBase
     // ----------------------------------------------------------
     // GET /credentials/Iso18013DriversLicenseCredential
     // ----------------------------------------------------------
-    [HttpGet("credentials/Iso18013DriversLicenseCredential")]
+    [HttpGet("credentials/DrivingLicence")]
     [HttpGet(".well-known/vct/credentials/Iso18013DriversLicenseCredential")]
     [ProducesResponseType(typeof(VctTypeMetadata), StatusCodes.Status200OK)]
     public IActionResult GetDriversLicense()

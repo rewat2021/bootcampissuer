@@ -9,7 +9,7 @@ public partial class Dbrequest
 
     public string? RegisterId { get; set; }
 
-    public string? CredentialId { get; set; }
+    public string CredentialId { get; set; } = null!;
 
     public DateTime? CreateDate { get; set; }
 

@@ -2,13 +2,16 @@
 
 namespace IssuerAPI.Models
 {
-	public class AuthenUser
-	{
-		[Required(ErrorMessage = "Username is required")]
-		public string username { get; set; }
-	}
+    public class AuthenUser
+    {
+        [Required(ErrorMessage = "กรุณากรอก Username")]
+        public string username { get; set; } = string.Empty;
 
-	public class Register
+        [Required(ErrorMessage = "กรุณากรอก Password")]
+        public string password { get; set; } = string.Empty;
+    }
+
+    public class Register
 	{
         public string UnitId { get; set; }
         public string Contact { get; set; }

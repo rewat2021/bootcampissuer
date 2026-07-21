@@ -187,105 +187,105 @@ namespace IssuerAPI.Controllers
         //   "labelTh": "วันสำเร็จการศึกษา"
         // }
         // ─────────────────────────────────────────────────────────────────────
-        [HttpPost("claims/add-field")]
-        public async Task<IActionResult> AddField([FromBody] AddFieldRequest request)
-        {
-            if (string.IsNullOrWhiteSpace(request.FieldName))
-                return BadRequest(new { error = "FieldName is required" });
+        //[HttpPost("claims/add-field")]
+        //public async Task<IActionResult> AddField([FromBody] AddFieldRequest request)
+        //{
+        //    if (string.IsNullOrWhiteSpace(request.FieldName))
+        //        return BadRequest(new { error = "FieldName is required" });
 
-            try
-            {
-                var config = await LoadConfigAsync();
+        //    try
+        //    {
+        //        var config = await LoadConfigAsync();
 
-                if (config[credentialType] is not JsonObject cred)
-                    return NotFound(new { error = $"ไม่พบ credential type '{credentialType}'" });
+        //        if (config[credentialType] is not JsonObject cred)
+        //            return NotFound(new { error = $"ไม่พบ credential type '{credentialType}'" });
 
-                // ✅ ดึง claims object หรือสร้างใหม่
-                if (cred["claims"] is not JsonObject claimsObj)
-                {
-                    claimsObj = new JsonObject();
-                    cred["claims"] = claimsObj;
-                }
+        //        // ✅ ดึง claims object หรือสร้างใหม่
+        //        if (cred["claims"] is not JsonObject claimsObj)
+        //        {
+        //            claimsObj = new JsonObject();
+        //            cred["claims"] = claimsObj;
+        //        }
 
-                bool isUpdate = claimsObj.ContainsKey(request.FieldName);
+        //        bool isUpdate = claimsObj.ContainsKey(request.FieldName);
 
-                // ✅ สร้าง claim node ตาม OID4VCI 1.0 Final
-                var fieldNode = new JsonObject
-                {
-                    ["mandatory"] = request.Mandatory
-                };
+        //        // ✅ สร้าง claim node ตาม OID4VCI 1.0 Final
+        //        var fieldNode = new JsonObject
+        //        {
+        //            ["mandatory"] = request.Mandatory
+        //        };
 
-                var displayArr = new JsonArray();
-                if (!string.IsNullOrEmpty(request.LabelEn))
-                    displayArr.Add(new JsonObject { ["name"] = request.LabelEn, ["locale"] = "en" });
-                if (!string.IsNullOrEmpty(request.LabelTh))
-                    displayArr.Add(new JsonObject { ["name"] = request.LabelTh, ["locale"] = "th" });
+        //        var displayArr = new JsonArray();
+        //        if (!string.IsNullOrEmpty(request.LabelEn))
+        //            displayArr.Add(new JsonObject { ["name"] = request.LabelEn, ["locale"] = "en" });
+        //        if (!string.IsNullOrEmpty(request.LabelTh))
+        //            displayArr.Add(new JsonObject { ["name"] = request.LabelTh, ["locale"] = "th" });
 
-                if (displayArr.Count > 0)
-                    fieldNode["display"] = displayArr;
+        //        if (displayArr.Count > 0)
+        //            fieldNode["display"] = displayArr;
 
-                // ✅ upsert โดยใช้ field name เป็น key โดยตรง
-                claimsObj[request.FieldName] = fieldNode;
+        //        // ✅ upsert โดยใช้ field name เป็น key โดยตรง
+        //        claimsObj[request.FieldName] = fieldNode;
 
-                await SaveConfigAsync(config);
+        //        await SaveConfigAsync(config);
 
-                return Ok(new
-                {
-                    success = true,
-                    credentialType,
-                    fieldName = request.FieldName,
-                    action = isUpdate ? "updated" : "added",
-                    field = fieldNode
-                });
-            }
-            catch (Exception ex)
-            {
-                return StatusCode(500, new { error = ex.Message });
-            }
-        }
+        //        return Ok(new
+        //        {
+        //            success = true,
+        //            credentialType,
+        //            fieldName = request.FieldName,
+        //            action = isUpdate ? "updated" : "added",
+        //            field = fieldNode
+        //        });
+        //    }
+        //    catch (Exception ex)
+        //    {
+        //        return StatusCode(500, new { error = ex.Message });
+        //    }
+        //}
 
         // ─────────────────────────────────────────────────────────────────────
         // DELETE api/credential-config/claims/remove-field
         // ─────────────────────────────────────────────────────────────────────
-        [HttpDelete("claims/remove-field")]
-        public async Task<IActionResult> RemoveField([FromBody] RemoveFieldRequest request)
-        {
-            if (string.IsNullOrWhiteSpace(request.CredentialType))
-                return BadRequest(new { error = "CredentialType is required" });
+        //[HttpDelete("claims/remove-field")]
+        //public async Task<IActionResult> RemoveField([FromBody] RemoveFieldRequest request)
+        //{
+        //    if (string.IsNullOrWhiteSpace(request.CredentialType))
+        //        return BadRequest(new { error = "CredentialType is required" });
 
-            if (string.IsNullOrWhiteSpace(request.FieldName))
-                return BadRequest(new { error = "FieldName is required" });
+        //    if (string.IsNullOrWhiteSpace(request.FieldName))
+        //        return BadRequest(new { error = "FieldName is required" });
 
-            try
-            {
-                var config = await LoadConfigAsync();
+        //    try
+        //    {
+        //        var config = await LoadConfigAsync();
 
-                if (config[request.CredentialType] is not JsonObject cred)
-                    return NotFound(new { error = $"ไม่พบ credential type '{request.CredentialType}'" });
+        //        if (config[request.CredentialType] is not JsonObject cred)
+        //            return NotFound(new { error = $"ไม่พบ credential type '{request.CredentialType}'" });
 
-                // ✅ claims เป็น object — ลบด้วย key โดยตรง
-                if (cred["claims"] is not JsonObject claimsObj)
-                    return NotFound(new { error = "ไม่พบ claims object" });
+        //        // ✅ claims เป็น object — ลบด้วย key โดยตรง
+        //        if (cred["claims"] is not JsonObject claimsObj)
+        //            return NotFound(new { error = "ไม่พบ claims object" });
 
-                if (!claimsObj.ContainsKey(request.FieldName))
-                    return NotFound(new { error = $"ไม่พบ field '{request.FieldName}'" });
+        //        if (!claimsObj.ContainsKey(request.FieldName))
+        //            return NotFound(new { error = $"ไม่พบ field '{request.FieldName}'" });
 
-                claimsObj.Remove(request.FieldName);
-                await SaveConfigAsync(config);
+        //        claimsObj.Remove(request.FieldName);
+        //        await SaveConfigAsync(config);
 
-                return Ok(new
-                {
-                    success = true,
-                    credentialType = request.CredentialType,
-                    fieldName = request.FieldName,
-                    message = "ลบ field สำเร็จ"
-                });
-            }
-            catch (Exception ex)
-            {
-                return StatusCode(500, new { error = ex.Message });
-            }
-        }
+        //        return Ok(new
+        //        {
+        //            success = true,
+        //            credentialType = request.CredentialType,
+        //            fieldName = request.FieldName,
+        //            message = "ลบ field สำเร็จ"
+        //        });
+        //    }
+        //    catch (Exception ex)
+        //    {
+        //        return StatusCode(500, new { error = ex.Message });
+        //    }
+        //}
 
         // ─────────────────────────────────────────────────────────────────────
         // Helper: สร้าง claims JsonObject ตาม OID4VCI 1.0 Final

@@ -45,6 +45,280 @@ namespace IssuerAPI.Controllers
         [Route("/credential")]
         public IActionResult Credential([FromBody] IssuanceRequest request)
         {
+            VCService serv = new VCService();
+            DBService dbServ = new DBService();
+            string proof = request.proof.jwt;
+            string registerId = serv.getProofByNonce(proof);
+            string walletid = null;
+            string vcFormat = null;
+
+            logger.Info("Start Credential");
+            logger.Info($"registerid => {registerId}");
+            logger.Info($"proof => {request.proof}");
+
+            // ✅ ยังคงดึงมาเป็น List<string> เหมือนเดิม — คือ "รายการที่ authorize ไว้ทั้งหมด"
+            List<string> allowedDocTypes = dbServ.GetDocumentTypes(registerId);
+            if (allowedDocTypes == null || allowedDocTypes.Count == 0)
+            {
+                return BadRequest(new
+                {
+                    message = "Issue VC – VC Issuance Request Fail, not found Document Type",
+                    status = 400,
+                });
+            }
+
+            if (!ModelState.IsValid)
+            {
+                var item = new ApiLogs
+                {
+                    message = "Issue VC – VC Issuance Request Fail ❌)",
+                    status = 400,
+                    error = ModelState.Values.SelectMany(v => v.Errors).Select(e => e.ErrorMessage).ToList()
+                };
+                return BadRequest(new
+                {
+                    message = item.message,
+                    status = item.status,
+                    error = item.error
+                });
+            }
+
+            // ── ✅ เลือก 1 config id จาก request — ไม่ใช่เอา list มาทั้งก้อน ──
+            logger.Info($"credential_configuration_id (from request) => {request.credential_configuration_id}");
+
+            string selectedDocType;
+
+            if (string.IsNullOrEmpty(request.credential_configuration_id))
+            {
+                // ไม่ได้ระบุมา → fallback ได้เฉพาะกรณีมี config id เดียวใน list เท่านั้น (เช่น transcript)
+                // ถ้ามีหลายตัว (เช่นใบขับขี่ mDL+SD-JWT) ต้องบังคับให้ wallet ระบุมาเสมอ ไม่งั้นไม่รู้ว่าจะออกใบไหน
+                if (allowedDocTypes.Count == 1)
+                {
+                    selectedDocType = allowedDocTypes[0];
+                }
+                else
+                {
+                    return BadRequest(new
+                    {
+                        message = "credential_configuration_id is required when multiple formats are available",
+                        status = 400,
+                        available = allowedDocTypes
+                    });
+                }
+            }
+            else
+            {
+                // ✅ ตรวจว่า id ที่ wallet ขอมา อยู่ใน list ที่ authorize ไว้จริงไหม
+                selectedDocType = allowedDocTypes.FirstOrDefault(d => d == request.credential_configuration_id);
+
+                if (selectedDocType == null)
+                {
+                    return BadRequest(new
+                    {
+                        message = $"credential_configuration_id '{request.credential_configuration_id}' is not authorized for this request",
+                        status = 400,
+                        available = allowedDocTypes
+                    });
+                }
+            }
+
+            logger.Info($"selectedDocType => {selectedDocType}");
+
+            // Authorization header check (เดิม ไม่เปลี่ยน)
+            var authorizationHeader = HttpContext.Request.Headers["Authorization"].FirstOrDefault();
+            if (authorizationHeader == null || !authorizationHeader.StartsWith("Bearer "))
+            {
+                var item = new ApiLogs
+                {
+                    message = "Issue VC – VC Issuance Request Fail ❌",
+                    status = 401,
+                    error = new List<string> { "Authorization header is either missing or invalid." }
+                };
+                return Unauthorized(item);
+            }
+
+            var token = authorizationHeader.Substring("Bearer ".Length).Trim();
+            bool isValid = serv.IsTokenValid(_config, token);
+            if (!isValid)
+            {
+                var item = new ApiLogs
+                {
+                    message = "Issue VC – VC Issuance Request Fail ❌",
+                    status = 401,
+                    error = new List<string> { "Token is invalid" }
+                };
+                return Unauthorized(item);
+            }
+
+            string _credential = null;
+            string _nonce = null;
+            string issuerid = null;
+            JsonResult jResult = null;
+
+            try
+            {
+                string jwt = request.proof.jwt;
+                string[] parts = jwt.Split('.');
+                string headerJson = serv.Base64UrlDecodeToString(parts[0]);
+                logger.Info($">>> proof header: {headerJson}");
+                using JsonDocument doc = JsonDocument.Parse(headerJson);
+                string kid = doc.RootElement.GetProperty("kid").GetString();
+
+                string alg = doc.RootElement.GetProperty("alg").GetString();
+                logger.Info($">>> alg value: '{alg}'");
+                if (string.IsNullOrEmpty(alg))
+                {
+                    return BadRequest(new { credential = _credential, c_nonce = _nonce, statustext = "invalid encryption parameters alg", status = "400" });
+                }
+
+                List<string> alglist = new List<string> { "EdDSA", "ES256", "ES256K", "RS256", "none" };
+                if (!alglist.Contains(alg))
+                {
+                    return BadRequest(new { credential = _credential, c_nonce = _nonce, statustext = "invalid encryption parameters, type alg mis value", status = "400" });
+                }
+
+                string typ = doc.RootElement.GetProperty("typ").GetString();
+                if (string.IsNullOrEmpty(typ))
+                {
+                    return BadRequest(new { credential = _credential, c_nonce = _nonce, statustext = "invalid encryption parameters typ", status = "400" });
+                }
+
+                List<string> typlist = new List<string> { "JWT", "jwt", "openid4vci-proof+jwt" };
+                if (!typlist.Contains(typ))
+                {
+                    return BadRequest(new { credential = _credential, c_nonce = _nonce, statustext = "invalid encryption parameters typ, must be JWT", status = "400" });
+                }
+
+                string payloadJson = serv.Base64UrlDecodeToString(parts[1]);
+                using JsonDocument docPayload = JsonDocument.Parse(payloadJson);
+                string aud = docPayload.RootElement.GetProperty("aud").GetString();
+                List<string> audlist = new List<string> { "none", "-" };
+
+                if (string.IsNullOrEmpty(aud) || audlist.Contains(aud))
+                {
+                    return BadRequest(new { credential = _credential, c_nonce = _nonce, statustext = "the aud parameters is not set", status = "400" });
+                }
+
+                bool isValidUrl = Uri.TryCreate(aud, UriKind.Absolute, out Uri uriResult)
+                          && (uriResult.Scheme == Uri.UriSchemeHttp || uriResult.Scheme == Uri.UriSchemeHttps);
+                if (!isValidUrl)
+                {
+                    return BadRequest(new { credential = _credential, c_nonce = _nonce, statustext = "the aud parameters is invalid", status = "400" });
+                }
+
+                JsonElement root = docPayload.RootElement;
+                long striat = 0;
+                if (root.TryGetProperty("iat", out JsonElement iatElement) && iatElement.ValueKind != JsonValueKind.Null)
+                {
+                    striat = iatElement.ValueKind == JsonValueKind.String
+                        ? Convert.ToInt64(iatElement.GetString())
+                        : iatElement.GetInt64();
+                }
+
+                string iat = striat == 0 ? null : striat.ToString();
+                if (string.IsNullOrEmpty(iat) || audlist.Contains(iat))
+                {
+                    return BadRequest(new { credential = _credential, c_nonce = _nonce, statustext = "the iat parameters is not set", status = "400" });
+                }
+
+                try
+                {
+                    bool isValid_iat = serv.IsValidNumericDate(long.Parse(iat));
+                    if (!isValid_iat)
+                    {
+                        return BadRequest(new { credential = _credential, c_nonce = _nonce, statustext = "the iat parameters is invalid", status = "400" });
+                    }
+                }
+                catch
+                {
+                    return BadRequest(new { credential = _credential, c_nonce = _nonce, statustext = "the iat parameters is invalid", status = "400" });
+                }
+
+                walletid = kid.Split('#')[0];
+                issuerid = serv._GetDID(_env);
+
+                logger.Info($"selectedDocType => {selectedDocType}");
+
+                // ── ✅ ใช้ selectedDocType (string เดี่ยว) แทน vcDocType (list) ──
+                if (selectedDocType.EndsWith("dc+sd-jwt"))
+                {
+                    _credential = selectedDocType switch
+                    {
+                        "TranscriptCredential_dc+sd-jwt" => serv.GenerateTranscriptSdJwt(issuerid, walletid, _env, urlBase),
+                        "BootCampCredential_dc+sd-jwt" => serv.GenerateBootCampSdJwt(issuerid, walletid, _env, urlBase),
+                        "IDCard_dc+sd-jwt" => serv.GenerateIDCardSdJwt(issuerid, walletid, _env, urlBase),
+                        "Iso18013DriversLicenseCredential_dc+sd-jwt" => serv.GenerateDriversLicenseSdJwt(issuerid, walletid, _env, urlBase),
+                        _ => throw new Exception($"Unsupported credential type: {selectedDocType}")
+                    };
+                    _nonce = registerId;
+                }
+                else if (selectedDocType == "org.iso.18013.5.1.mDL")
+                {
+                    // ✅ เพิ่ม branch สำหรับ mdoc ที่ยังไม่มีในโค้ดเดิมเลย
+                    _credential = serv.GenerateDriverLicenseMdoc(issuerid, walletid, _env, /* deviceKeyX, deviceKeyY จาก proof JWK */ null, null);
+                    _nonce = registerId;
+                }
+                else
+                {
+                    var data = selectedDocType switch
+                    {
+                        "TranscriptCredential_jwt_vc_json" => serv.GenerateTranscriptVC(issuerid, walletid),
+                        "IDCardCredential_jwt_vc_json" => serv.GenerateIDCardVC(issuerid, walletid),
+                        _ => throw new Exception($"Unsupported credential type: {selectedDocType}")
+                    };
+
+                    jResult = data;
+                    var options = new JsonSerializerOptions
+                    {
+                        WriteIndented = false,
+                        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+                    };
+                    string json = JsonSerializer.Serialize(data.Value, options);
+
+                    PemReader pemReaderPrivate = new PemReader(new StringReader(serv.GetKey(true, _env)));
+                    Ed25519PrivateKeyParameters privateKeyEd25519 = (Ed25519PrivateKeyParameters)pemReaderPrivate.ReadObject();
+                    _credential = serv.GenerateJWTEd25519(json, issuerid, privateKeyEd25519);
+                    _nonce = registerId;
+                }
+
+                vcFormat = selectedDocType == "org.iso.18013.5.1.mDL" ? "mso_mdoc"
+                         : selectedDocType.EndsWith("dc+sd-jwt") ? "dc+sd-jwt"
+                         : "jwt_vc_json";
+
+                logger.Info($"format => {vcFormat}");
+            }
+            catch (Exception e)
+            {
+                var error = new
+                {
+                    format = vcFormat,
+                    credential = _credential,
+                    c_nonce = _nonce,
+                    statustext = $"{e.Message}, {e.InnerException}",
+                    status = "400",
+                    msg = jResult
+                };
+
+                dbServ.SaveIssueVCLog(issuerid, walletid, _nonce, _credential, vcFormat, "failed");
+                return BadRequest(error);
+            }
+
+            var res = new
+            {
+                format = vcFormat,
+                credential = _credential,
+                c_nonce = _nonce,
+                c_nonce_expires = 86400,
+                notification_id = "",
+                status = "200",
+            };
+
+            logger.Info(JsonSerializer.Serialize(res));
+            dbServ.SaveIssueVCLog(issuerid, walletid, _nonce, _credential, vcFormat, "success");
+            return Ok(res);
+        }
+
+        /*{
             //logs.Add(JsonSerializer.Serialize(new { message = "Accept Request ✅" }, new JsonSerializerOptions { WriteIndented = true }));
             VCService serv = new VCService();
             DBService dbServ = new DBService();
@@ -57,7 +331,7 @@ namespace IssuerAPI.Controllers
             logger.Info($"registerid => {registerId}");
             logger.Info($"proof => {request.proof}");
 
-            string vcDocType = dbServ.GetDocumentType(registerId);
+            List<string> vcDocType = dbServ.GetDocumentTypes(registerId);
             if (vcDocType == null)
             {
                 return BadRequest(new
@@ -89,15 +363,7 @@ namespace IssuerAPI.Controllers
                 });
             }
 
-            //ActionLog.InsertLogAction(AppContextHelper.UserId, AppConstant.Holder, AppConstant.Issuer, "FT.IC.AU.H.I.VB.002", $"Authorization_Response => {JsonSerializer.Serialize(request)}", "200", null);
-            //if (string.IsNullOrEmpty(request.credential_configuration_id))
-            //{
-            //    return BadRequest(new
-            //    {
-            //        error = "invalid_request",
-            //        error_description = "credential_configuration_id is required"
-            //    });
-            //}
+
 
             // แทนที่ block เดิมที่ return BadRequest
             logger.Info($"credential_configuration_id => {request.credential_configuration_id}");
@@ -106,38 +372,7 @@ namespace IssuerAPI.Controllers
                 request.credential_configuration_id = vcDocType; // fallback จาก DB
             }
             logger.Info($"credential_configuration_id => {request.credential_configuration_id}");
-            /*if (string.IsNullOrEmpty(request.credential_configuration_id))// && string.IsNullOrEmpty(request.format))
-            {
-                var item = new ApiLogs
-                {
-                    message = "Issue VC – VC Issuance Request Fail ❌)",
-                    status = 500,
-                    error = new List<string> { "credential_identifier or format is null" }
-                };
-                
-                return BadRequest(new
-                {
-                    message = item.message,
-                    status = item.status,
-                    error = item.error
-                });
-            }
-            if (!string.IsNullOrEmpty(request.credential_configuration_id))// && !string.IsNullOrEmpty(request.format))
-            {
-                var item = new ApiLogs
-                {
-                    message = "Issue VC – VC Issuance Request Fail ❌)",
-                    status = 500,
-                    error = new List<string> { "‘credential_identifier’ and ‘format’ MUST NOT be used simultaneously" }
-                };
-                
-                return BadRequest(new
-                {
-                    message = item.message,
-                    status = item.status,
-                    error = item.error
-                });
-            }*/
+
             //logs.Add(JsonSerializer.Serialize(request, new JsonSerializerOptions { WriteIndented = true }));
             // Retrieve the Authorization header
             var authorizationHeader = HttpContext.Request.Headers["Authorization"].FirstOrDefault();
@@ -409,15 +644,15 @@ namespace IssuerAPI.Controllers
                     {
                         "TranscriptCredential_dc+sd-jwt" => serv.GenerateTranscriptSdJwt(issuerid, walletid, _env, urlBase),
                         "BootCampCredential_dc+sd-jwt" => serv.GenerateBootCampSdJwt(issuerid, walletid, _env, urlBase),
-                        // "IDCard_dc+sd-jwt" => serv.GenerateIDCardSdJwt(issuerid, walletid, _env, urlBase),
-                        // "Iso18013DriversLicenseCredential_dc+sd-jwt" => serv.GenerateDriversLicenseSdJwt(issuerid, walletid, _env, urlBase),
+                        "IDCard_dc+sd-jwt" => serv.GenerateIDCardSdJwt(issuerid, walletid, _env, urlBase),
+                        "Iso18013DriversLicenseCredential_dc+sd-jwt" => serv.GenerateDriversLicenseSdJwt(issuerid, walletid, _env, urlBase),
                         _ => throw new Exception($"Unsupported credential type: {vcDocType}")
                     };
                     _nonce = registerId;
                     logger.Info($">>> SD-JWT: {_credential?.Substring(0, Math.Min(100, _credential?.Length ?? 0))}");
                     logger.Info($">>> Contains ~: {_credential?.Contains('~')}");
                     logger.Info($">>> Tilde count: {_credential?.Count(c => c == '~')}");
-                    
+
                 }
                 else
                 {
@@ -488,6 +723,6 @@ namespace IssuerAPI.Controllers
 
             //logs.Add(JsonSerializer.Serialize(new { message = res }, new JsonSerializerOptions { WriteIndented = true }));
             return Ok(res);
-        }
+        }*/
     }
 }

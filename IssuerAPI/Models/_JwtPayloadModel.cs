@@ -33,7 +33,7 @@ namespace IssuerAPI.Models
         public List<string> type { get; set; }
         public issuer issuer { get; set; }
         public string issuanceDate { get; set; }
-        //public string expireDate { get; set; }
+        public string expirationDate { get; set; }
         public _credentialSubject credentialSubject { get; set; }
 
         public CredentialStatus credentialStatus { get; set; }
@@ -741,16 +741,4 @@ public class vcModel
 
 
 }
-/*using System.Text.Json.Serialization;
 
-namespace EtdaVCIssuer.Models
-{
-    public class JwtPayloadModel
-    {
-        public string University { get; set; }
-        public string Student { get; set; }
-        public string GPA { get; set; }
-        *//*public string id { get; set; }*//*
-
-    }
-}*/

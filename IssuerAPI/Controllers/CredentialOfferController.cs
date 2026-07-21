@@ -46,35 +46,49 @@ namespace IssuerAPI.Controllers
         [HttpPost("/credential-offer")]
         public IActionResult GenerateCredentialOfferQr([FromBody] GenerateQrRequest request)
         {
+
+            //for SD-JWT
             //string credentialConfigurationId = request.DocumentType switch
             //{
-            //    DocumentType.Transcript => "TranscriptCredential_jwt_vc_json",
-            //    DocumentType.IdCard => "IDCardCredential_jwt_vc_json",
-            //    DocumentType.DriverLicense => "DriverLicenseCredential_jwt_vc_json",
+            //    DocumentType.Transcript => "TranscriptCredential_dc+sd-jwt",
+            //    DocumentType.IdCard => "IDCard_dc+sd-jwt",
+            //    DocumentType.DriverLicense => "Iso18013DriversLicenseCredential_dc+sd-jwt",
+            //    DocumentType.BootCamp => "BootCampCredential_dc+sd-jwt",
             //    _ => throw new ArgumentOutOfRangeException()
             //};
 
-            //for SD-JWT
-            string credentialConfigurationId = request.DocumentType switch
+            List<string> credentialConfigurationIds = new();
+
+            if (request.DocumentType == DocumentType.DriverLicense)
             {
-                DocumentType.Transcript => "TranscriptCredential_dc+sd-jwt",
-                DocumentType.IdCard => "IDCard_dc+sd-jwt",
-                DocumentType.DriverLicense => "Iso18013DriversLicenseCredential_dc+sd-jwt",
-                DocumentType.BootCamp => "BootCampCredential_dc+sd-jwt",
-                _ => throw new ArgumentOutOfRangeException()
-            };
+                // ใบขับขี่ -> ออกทั้ง mDoc และ SD-JWT พร้อมกัน
+                credentialConfigurationIds.Add("org.iso.18013.5.1.mDL");                    // mso_mdoc
+                credentialConfigurationIds.Add("Iso18013DriversLicenseCredential_dc+sd-jwt"); // dc+sd-jwt
+            }
+            else
+            {
+                // เอกสารอื่น -> ออกแค่ SD-JWT ตามเดิม
+                string credentialConfigurationId = request.DocumentType switch
+                {
+                    DocumentType.Transcript => "TranscriptCredential_dc+sd-jwt",
+                    DocumentType.IdCard => "IDCard_dc+sd-jwt",
+                    DocumentType.BootCamp => "BootCampCredential_dc+sd-jwt",
+                    _ => throw new ArgumentOutOfRangeException()
+                };
+                credentialConfigurationIds.Add(credentialConfigurationId);
+            }
+
 
             string stateId = Guid.NewGuid().ToString();
             VCService serv = new VCService();
 
             string guid = new Service.VCService().GetGUID();
             string url = serv.CheckHttps(HttpContext.Request.GetDisplayUrl());
-            //var baseUrl = $"{Request.Scheme}://{Request.Host}";
             var baseUrl = _config["BASE_URL"] ?? $"{Request.Scheme}://{Request.Host}";
-            CredentialOffer credentialOffer = new CredentialOffer();
-            credentialOffer.credential_issuer = baseUrl;
-            credentialOffer.credential_configuration_ids = new List<string>();
-            credentialOffer.credential_configuration_ids.Add(credentialConfigurationId);
+            //CredentialOffer credentialOffer = new CredentialOffer();
+            //credentialOffer.credential_issuer = baseUrl;
+            //credentialOffer.credential_configuration_ids = new List<string>();
+            //credentialOffer.credential_configuration_ids.Add(credentialConfigurationId);
 
             grant grant = new grant();
             byte[] random = new Byte[8];
@@ -89,7 +103,7 @@ namespace IssuerAPI.Controllers
             var _credentialOffer = new
             {
                 credential_issuer = baseUrl,
-                credential_configuration_ids = new[] { credentialConfigurationId },
+                credential_configuration_ids = credentialConfigurationIds.ToArray(), //new[] { credentialConfigurationId },
                 grants = new Dictionary<string, object>
                 {
                     {
@@ -102,13 +116,14 @@ namespace IssuerAPI.Controllers
                 }
             };
 
+            
             var offer = Newtonsoft.Json.JsonConvert.SerializeObject(_credentialOffer);
             string credentialOfferUrl = "openid-credential-offer://?credential_offer_uri=" + Uri.EscapeDataString($"{baseUrl}/openid4vc/credentialOffer?id={guid}");
 
 
             //save dbrequest vc
             DBService dbServ = new DBService();
-            dbServ.SaveRequestCredential(guid, credentialConfigurationId, preAuthorizedCode);
+            dbServ.SaveRequestCredential(guid, credentialConfigurationIds, preAuthorizedCode);
 
             //string credentialOfferUrl =
             //    $"{baseUrl}/openid4vc/credentialoffer?id={stateId}";
@@ -164,53 +179,93 @@ namespace IssuerAPI.Controllers
         }
 
         [HttpGet("/openid4vc/credentialOffer")]
-        public IActionResult CredentialOffer([FromQuery] string id)//, string docType)
+        public IActionResult CredentialOffer([FromQuery] string id)
         {
             DBService serv = new DBService();
             Utilities util = new Utilities();
-            //AppContextHelper.UserId = serv.GetRegisterId(id);
-
-
             credentialOfferId = id;
             var baseUrl = $"{Request.Scheme}://{Request.Host}";
 
-            string credentialConfigurationId = serv.GetDocumentType(id);
-            
+            // ✅ เปลี่ยนจาก GetDocumentType (เอกพจน์) เป็น GetDocumentTypes (พหูพจน์ — deserialize แล้ว)
+            List<string> credentialConfigurationIds = serv.GetDocumentTypes(id);
+
+            if (credentialConfigurationIds == null || credentialConfigurationIds.Count == 0)
+            {
+                return BadRequest(new { message = "invalid credential_configuration_ids ❌" });
+            }
+
             AccessCode accessCode = serv.getPreAuthorizedByRegisID(id);
+
             var credentialOffer = new
             {
                 credential_issuer = baseUrl,
-                credential_configuration_ids = new[] { credentialConfigurationId },
+                credential_configuration_ids = credentialConfigurationIds,   // ✅ ใส่ list ตรง ๆ ไม่ห่อซ้ำ
                 grants = new Dictionary<string, object>
+        {
+            {
+                "urn:ietf:params:oauth:grant-type:pre-authorized_code",
+                new Dictionary<string, object>
                 {
-                    {
-                        "urn:ietf:params:oauth:grant-type:pre-authorized_code",
-                        new Dictionary<string, object>
-                        {
-                            { "pre-authorized_code", accessCode.authoriseCode }
-                        }
-                    }
+                    { "pre-authorized_code", accessCode.authoriseCode }
                 }
+            }
+        }
             };
 
-            var offer = System.Text.Json.JsonSerializer.Serialize(credentialOffer);
-
-
-            string credential_issuer = null;
-
-            if (string.IsNullOrEmpty(credentialOffer.credential_issuer) || credentialOffer.credential_configuration_ids == null ||
-                credentialOffer.credential_configuration_ids.Length == 0)
+            if (string.IsNullOrEmpty(credentialOffer.credential_issuer))
             {
-                return BadRequest(new
-                {
-                    message = "invalid credential_issuer ❌"
-                });
+                return BadRequest(new { message = "invalid credential_issuer ❌" });
             }
-
-
-            //ActionLog.InsertLogAction(AppContextHelper.UserId, AppConstant.Holder, AppConstant.Issuer, "FT.IC.CO.H.I.VB.005", $"Credential Offer => {credential_issuer}", "200", id);
 
             return Ok(credentialOffer);
         }
+        //public IActionResult CredentialOffer([FromQuery] string id)//, string docType)
+        //{
+        //    DBService serv = new DBService();
+        //    Utilities util = new Utilities();
+
+
+
+        //    credentialOfferId = id;
+        //    var baseUrl = $"{Request.Scheme}://{Request.Host}";
+
+        //    string credentialConfigurationId = serv.GetDocumentType(id);
+
+        //    AccessCode accessCode = serv.getPreAuthorizedByRegisID(id);
+        //    var credentialOffer = new
+        //    {
+        //        credential_issuer = baseUrl,
+        //        credential_configuration_ids = new[] { credentialConfigurationId },
+        //        grants = new Dictionary<string, object>
+        //        {
+        //            {
+        //                "urn:ietf:params:oauth:grant-type:pre-authorized_code",
+        //                new Dictionary<string, object>
+        //                {
+        //                    { "pre-authorized_code", accessCode.authoriseCode }
+        //                }
+        //            }
+        //        }
+        //    };
+
+        //    var offer = System.Text.Json.JsonSerializer.Serialize(credentialOffer);
+
+
+        //    string credential_issuer = null;
+
+        //    if (string.IsNullOrEmpty(credentialOffer.credential_issuer) || credentialOffer.credential_configuration_ids == null ||
+        //        credentialOffer.credential_configuration_ids.Length == 0)
+        //    {
+        //        return BadRequest(new
+        //        {
+        //            message = "invalid credential_issuer ❌"
+        //        });
+        //    }
+
+
+        //    //ActionLog.InsertLogAction(AppContextHelper.UserId, AppConstant.Holder, AppConstant.Issuer, "FT.IC.CO.H.I.VB.005", $"Credential Offer => {credential_issuer}", "200", id);
+
+        //    return Ok(credentialOffer);
+        //}
     }
 }

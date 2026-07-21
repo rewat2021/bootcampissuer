@@ -3,7 +3,6 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.IdentityModel.Tokens;
 using NSec.Cryptography;
-using Org.BouncyCastle.Asn1.Ocsp;
 using Org.BouncyCastle.Crypto.Generators;
 using Org.BouncyCastle.Crypto.Parameters;
 using Org.BouncyCastle.Crypto.Signers;
@@ -18,6 +17,9 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
+using PeterO.Cbor;
+using System.Security.Cryptography.Cose;
+using System.Security.Cryptography;
 
 
 namespace IssuerAPI.Service
@@ -307,6 +309,30 @@ namespace IssuerAPI.Service
                 //return false;
             }
             return vc_token;
+        }
+
+        public string GetKey(bool isPrivate, IWebHostEnvironment _env, string keyType)
+        {
+            var client = "Tester";
+            string privateKeyDbKey = $"{keyType}_privateKey";
+            string publicKeyDbKey = $"{keyType}_publicKey";
+
+            var privateKey = Database.Read(client, privateKeyDbKey, _env);
+            var publicKey = Database.Read(client, publicKeyDbKey, _env);
+
+            if (string.IsNullOrEmpty(privateKey) || string.IsNullOrEmpty(publicKey))
+            {
+                // สร้าง ECDSA P-256 key pair ใหม่ — คนละคู่จาก Ed25519 ที่ GetKey เดิมสร้าง
+                // เพราะ mdoc (ISO 18013-5) บังคับต้องใช้ ES256 เท่านั้น
+                using ECDsa ecdsa = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+                privateKey = ecdsa.ExportPkcs8PrivateKeyPem();
+                publicKey = ecdsa.ExportSubjectPublicKeyInfoPem();
+
+                Database.Write(client, privateKeyDbKey, privateKey, _env);
+                Database.Write(client, publicKeyDbKey, publicKey, _env);
+            }
+
+            return isPrivate ? privateKey : publicKey;
         }
 
         public string GetKey(bool isPrivate, IWebHostEnvironment _env)
@@ -795,7 +821,7 @@ namespace IssuerAPI.Service
                 item.Identifier.Name = "StudenID";
                 item.Identifier.Value = "123456";
 
-                item.HonorificPrefix = "นาย";
+                item.HonorificPrefix = "นางสาว";
                 item.GivenName = "ทดสอบ";
                 item.FamilyName = "เอกสารดิจิตัล";
                 item.Gender = "1";
@@ -947,6 +973,87 @@ namespace IssuerAPI.Service
 
         }
 
+        public JsonResult GenerateDriverLicenseVC(string issuerid, string walletid)
+        {
+            var token = new JsonResult(new { Ok = "" });
+
+            try
+            {
+                Guid newGuid = Guid.NewGuid();
+                DateTime currentTime = DateTime.UtcNow;
+                long unixTime = ((DateTimeOffset)currentTime).ToUnixTimeSeconds();
+
+                _JwtPayloadModelDrivingLicence model = new _JwtPayloadModelDrivingLicence();
+                model.issuer.id = issuerid;
+                model.issuer.name = "กรมการขนส่งทางบก";
+                model.id = $"urn:uuid:{newGuid}";
+                model.issuanceDate = currentTime.ToString("yyyy-MM-ddTHH:mm:ssZ");
+                model.expirationDate = currentTime.AddYears(10).ToString("yyyy-MM-ddTHH:mm:ssZ");
+
+                vcModelDrivingLicence payload = new vcModelDrivingLicence();
+                payload.iss = issuerid;
+                payload.sub = walletid;
+                payload.vc = model;
+                payload.jti = $"urn:uuid:{newGuid}";
+                payload.iat = unixTime;
+                payload.nbf = unixTime;
+
+                var subject = model.credentialSubject;   // แก้ไขตัวที่ constructor สร้างไว้แล้ว แทนสร้างใหม่
+                subject.id = walletid;
+                subject.FamilyName = "สมชาย";
+                subject.GivenName = "สมศักดิ์";
+                subject.BirthDate = "1985-01-01";
+                subject.IssueDate = "2023-01-01";
+                subject.ExpiryDate = "2033-01-01";
+                subject.IssuingCountry = "TH";
+                subject.IssuingAuthority = "กรมการขนส่งทางบก";
+                subject.DocumentNumber = "123456789";
+                subject.Portrait = "base64_encoded_image_string";
+                subject.DrivingPrivileges = new List<DrivingPrivilege>
+        {
+            new DrivingPrivilege { Category = "รถยนต์ส่วนบุคคล", Restrictions = new() { "ขับขี่เฉพาะเวลากลางวัน" }, Conditions = new() { "ต้องสวมแว่นตาเมื่อขับขี่" } },
+            new DrivingPrivilege { Category = "รถจักรยานยนต์", Restrictions = new() { "ต้องสวมหมวกกันน็อค" }, Conditions = new() }
+        };
+                subject.UnDistinguishingSign = "TH";
+                subject.AdministrativeNumber = "987654321";
+                subject.Sex = "ชาย";
+                subject.Height = 175;
+                subject.Weight = 70;
+                subject.EyeColour = "น้ำตาล";
+                subject.HairColour = "ดำ";
+                subject.BirthPlace = "กรุงเทพมหานคร";
+                subject.ResidentAddress = "123/45 ถนนสุขุมวิท";
+                subject.ResidentCity = "กรุงเทพมหานคร";
+                subject.ResidentState = "กรุงเทพมหานคร";
+                subject.ResidentPostalCode = "10110";
+                subject.ResidentCountry = "TH";
+                subject.BiometricTemplate = "base64_encoded_biometric_data";
+                subject.GivenNameNationalCharacter = "สมศักดิ์";
+                subject.SignatureUsualMark = "base64_encoded_signature_image";
+
+                model.credentialStatus.Id = "https://example.com/credentials/status/3#94567";
+                model.credentialStatus.Type = "BitstringStatusListEntry";
+                model.credentialStatus.StatusPurpose = "revocation";
+                model.credentialStatus.StatusListIndex = "94567";
+                model.credentialStatus.StatusListCredential = "https://example.com/credentials/status/3";
+
+                model.credentialSchema.id = "https://gitlab.com/ETDATH-TEDA-Schema-UAT/teda-objects/common/verified-credential/drivinglicence/-/blob/main/schema/drivingLicence-schema.json";
+                model.credentialSchema.type = "JsonSchema";
+
+                var options = new JsonSerializerOptions { WriteIndented = true };
+                var writeToken = JsonSerializer.Serialize(model, options);
+                //**Database.Write(client, "VC", writeToken);
+
+                token = new JsonResult(payload);
+            }
+            catch (Exception e)
+            {
+                token = new JsonResult(new { error = e.Message }) { StatusCode = 400 };
+            }
+
+            return token;
+        }
+
 
         public JsonResult GenerateIDCardVC(string issuerid, string walletid)
         {
@@ -959,7 +1066,7 @@ namespace IssuerAPI.Service
 
                 model.issuer.id = issuerid; //GetLegalEntityDID();
 
-                model.issuer.name = "Department Of Provincial Administration";//UniversityName;
+                model.issuer.name = "กรมการปกครอง";//UniversityName;
 
                 Guid newGuid = Guid.NewGuid();
 
@@ -1008,7 +1115,7 @@ namespace IssuerAPI.Service
                 docInform.Identifier = new IdentifierDocument();
                 docInform.Identifier.Type = "PropertyValue";
                 docInform.Identifier.PropertyID = "PID ID";
-                docInform.Identifier.Value = "123456";
+                docInform.Identifier.Value = "1234567890123";
                 docInform.Name = "PID Name";
                 docInform.AdditionalType = "รหัสระบุประเภทเอกสาร";
                 docInform.EducationalUse = "วัตถุประสงค์";
@@ -1026,10 +1133,10 @@ namespace IssuerAPI.Service
                 item.Type = "Person";
                 item.Identifier = new Identifier();
                 item.Identifier.Type = "PropertyValue";
-                item.Identifier.Name = "StudenID";
-                item.Identifier.Value = "123456";
+                item.Identifier.Name = "IDNumber";
+                item.Identifier.Value = "1234567890123";
 
-                item.HonorificPrefix = "นาย";
+                item.HonorificPrefix = "นางสาว";
                 item.GivenName = "ทดสอบ";
                 item.FamilyName = "เอกสารดิจิตัล";
                 item.Gender = "1";
@@ -1048,7 +1155,7 @@ namespace IssuerAPI.Service
                 program.Identifier = new Identifier();
                 program.Identifier.Type = "PropertyValue";
                 program.Identifier.Name = "ProgramID";
-                program.Identifier.Value = "123456";
+                program.Identifier.Value = "1234567890123";
                 program.Name = "ชื่อหลักสูตร";
                 program.ProgramType.Add(new ProgramType()
                 {
@@ -1309,6 +1416,244 @@ namespace IssuerAPI.Service
             return sdJwt;
         }
 
+        public string GenerateDriversLicenseSdJwt(string issuerid, string walletid, IWebHostEnvironment _env, string UrlBase)
+        {
+            // ── 1. ดึง private key (Ed25519) เหมือนเดิม ──────────────
+            PemReader pemReaderPrivate = new PemReader(new StringReader(GetKey(true, _env)));
+            Ed25519PrivateKeyParameters privateKey = (Ed25519PrivateKeyParameters)pemReaderPrivate.ReadObject();
+
+            // ── 2. ดึงข้อมูลใบขับขี่จาก GenerateDriverLicenseVC (ที่แก้ไว้แล้วให้ return vcModelDrivingLicence) ─
+            var vcResult = GenerateDriverLicenseVC(issuerid, walletid);
+            var vcPayload = vcResult.Value as vcModelDrivingLicence
+                ?? throw new Exception("GenerateDriverLicenseVC failed");
+
+            var subject = vcPayload.vc.credentialSubject;              // _credentialSubjectDrivingLicence
+            var institutionName = vcPayload.vc.issuer.name;             // "กรมการขนส่งทางบก"
+
+            // ── 3. สร้าง Disclosures (SD claims) — map ตาม schema drivingLicence-vc.json ─
+            var sdClaims = new Dictionary<string, object>
+            {
+                ["family_name"] = subject.FamilyName,
+                ["given_name"] = subject.GivenName,
+                ["birth_date"] = subject.BirthDate,
+                ["document_number"] = subject.DocumentNumber,
+                ["issue_date"] = subject.IssueDate,
+                ["expiry_date"] = subject.ExpiryDate,
+                ["resident_address"] = subject.ResidentAddress,
+                ["driving_privileges"] = subject.DrivingPrivileges,   // ✅ field สำคัญที่หายไปในโค้ดเดิม
+                ["portrait"] = subject.Portrait,
+            };
+
+            // issuing_authority + issuing_country เป็น Non-SD (แสดงเสมอ ไม่ต้องซ่อน)
+
+            // ── 4. สร้าง Disclosure objects และเก็บ hash ─────────────
+            var disclosures = new List<string>();
+            var sdHashes = new List<string>();
+            using var sha256 = System.Security.Cryptography.SHA256.Create();
+
+            foreach (var (claimName, claimValue) in sdClaims)
+            {
+                var saltBytes = new byte[16];
+                System.Security.Cryptography.RandomNumberGenerator.Fill(saltBytes);
+                string salt = Base64UrlEncode(saltBytes);
+
+                var discArray = new object[] { salt, claimName, claimValue };
+                string discJson = System.Text.Json.JsonSerializer.Serialize(discArray,
+                    new System.Text.Json.JsonSerializerOptions
+                    {
+                        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.Default
+                    });
+                string discEncoded = Base64UrlEncode(System.Text.Encoding.UTF8.GetBytes(discJson));
+
+                byte[] hashBytes = sha256.ComputeHash(System.Text.Encoding.UTF8.GetBytes(discEncoded));
+                string hashB64 = Base64UrlEncode(hashBytes);
+
+                disclosures.Add(discEncoded);
+                sdHashes.Add(hashB64);
+            }
+
+            // ── 5. สร้าง JWT payload ──────────────────────────────────
+            DateTime now = DateTime.UtcNow;
+            long iat = ((DateTimeOffset)now).ToUnixTimeSeconds();
+            long exp = ((DateTimeOffset)now.AddYears(5)).ToUnixTimeSeconds();
+            string jti = $"urn:uuid:{Guid.NewGuid()}";
+            var cnf = new { kid = walletid };
+
+            var payload = new
+            {
+                iss = issuerid,
+                sub = walletid,
+                vct = $"{UrlBase}/credentials/DrivingLicence",   // ✅ แก้จาก IDCard เป็น DrivingLicence
+                jti = jti,
+                iat = iat,
+                exp = exp,
+                issuing_authority = subject.IssuingAuthority,     // Non-SD — แสดงเสมอ
+                issuing_country = subject.IssuingCountry,         // Non-SD — แสดงเสมอ
+                institution_name = institutionName,               // Non-SD
+                _sd = sdHashes,
+                _sd_alg = "sha-256",
+                cnf = cnf,
+                issued = now.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                issuanceDate = now.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+            };
+
+            // ── 6. Sign ด้วย Ed25519 (เหมือนเดิม ไม่ต้องแก้) ─
+            string header = $"{{\"alg\":\"EdDSA\",\"typ\":\"dc+sd-jwt\",\"kid\":\"{issuerid}\"}}";
+
+            var options = new System.Text.Json.JsonSerializerOptions
+            {
+                WriteIndented = false,
+                Encoder = System.Text.Encodings.Web.JavaScriptEncoder.Default,
+                DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull,
+            };
+
+            string payloadJson = System.Text.Json.JsonSerializer.Serialize(payload, options);
+            string headerB64 = WebEncoders.Base64UrlEncode(Encoding.UTF8.GetBytes(header))
+                .Replace("+", "-").Replace("/", "_").TrimEnd('=');
+            string payloadB64 = WebEncoders.Base64UrlEncode(Encoding.UTF8.GetBytes(payloadJson));
+            string signingInput = $"{headerB64}.{payloadB64}";
+            byte[] signingBytes = Encoding.UTF8.GetBytes(signingInput);
+
+            var signer = new Ed25519Signer();
+            signer.Init(true, privateKey);
+            signer.BlockUpdate(signingBytes, 0, signingBytes.Length);
+            string encodedSignature = WebEncoders.Base64UrlEncode(signer.GenerateSignature());
+
+            // ── 7. ประกอบ SD-JWT string ───────────────────────────────
+            string sdJwt = $"{headerB64}.{payloadB64}.{encodedSignature}";
+            foreach (var disc in disclosures)
+                sdJwt += $"~{disc}";
+            sdJwt += "~";
+
+            return sdJwt;
+        }
+
+        public string GenerateIDCardSdJwt(string issuerid, string walletid, IWebHostEnvironment _env, string UrlBase)
+        {
+            // ── 1. ดึง private key (Ed25519) เหมือนเดิม ──────────────
+            PemReader pemReaderPrivate = new PemReader(new StringReader(GetKey(true, _env)));
+            Ed25519PrivateKeyParameters privateKey = (Ed25519PrivateKeyParameters)pemReaderPrivate.ReadObject();
+
+            // ── 2. ดึงข้อมูล transcript จาก GenerateIDCardVC เดิม ─
+            //      (ในอนาคตให้โหลดจาก DB แทน)
+            var vcResult = GenerateIDCardVC(issuerid, walletid);
+            var vcPayload = vcResult.Value as vcModel ?? throw new Exception("GenerateIDCardVC failed");
+
+            var student = vcPayload.vc.credentialSubject.tedastudent;
+            var school = vcPayload.vc.credentialSubject.educationalOrganization;
+            var program = student?.ProgramContext;
+            var institutionName = vcPayload?.vc.issuer.name;
+            var academic = vcPayload.vc.credentialSubject.academicSummary;
+
+            // ── 3. สร้าง Disclosures (SD claims) ─────────────────────
+            //      แต่ละ Disclosure = base64url([salt, claim_name, value])
+            var sdClaims = new Dictionary<string, object>
+            {
+                ["id_number"] = student?.Identifier?.Value ?? "",
+                ["full_name"] = $"{student?.HonorificPrefix}{student?.GivenName} {student?.FamilyName}",
+                ["birthdate"] = "10 มิ.ย. 2530",
+                ["expiry_date"] = "11 มิ.ย. 2575",//academic?.SemesterSummaries?.FirstOrDefault()?.SemesterGPA ?? 0,
+                ["address"] = "123 ซ.พหลโยธิน 2 ถ.พหลโยธิน สามเสนใน พญาไท กทม. 11000",
+                ["religion"] = "พุทธ",
+            };
+
+            // institution_name เป็น Non-SD (ไม่ผ่าน Disclosure — ฝังใน payload โดยตรง)
+            //string institutionName = 
+
+            // ── 4. สร้าง Disclosure objects และเก็บ hash ─────────────
+            var disclosures = new List<string>();   // base64url encoded disclosures
+            var sdHashes = new List<string>();   // sha-256 hash ของแต่ละ disclosure
+
+            using var sha256 = System.Security.Cryptography.SHA256.Create();
+
+            foreach (var (claimName, claimValue) in sdClaims)
+            {
+                // salt = random 16 bytes → base64url
+                var saltBytes = new byte[16];
+                System.Security.Cryptography.RandomNumberGenerator.Fill(saltBytes);
+                string salt = Base64UrlEncode(saltBytes);
+
+                // Disclosure array: [salt, claim_name, value]
+                var discArray = new object[] { salt, claimName, claimValue };
+                // ✅ ใหม่
+                string discJson = System.Text.Json.JsonSerializer.Serialize(discArray,
+                    new System.Text.Json.JsonSerializerOptions
+                    {
+                        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.Default
+                    });
+                string discEncoded = Base64UrlEncode(System.Text.Encoding.UTF8.GetBytes(discJson));
+
+                // hash ของ disclosure → ใส่ใน _sd array
+                byte[] hashBytes = sha256.ComputeHash(System.Text.Encoding.UTF8.GetBytes(discEncoded));
+                string hashB64 = Base64UrlEncode(hashBytes);
+
+                disclosures.Add(discEncoded);
+                sdHashes.Add(hashB64);
+            }
+
+            // ── 5. สร้าง JWT payload ──────────────────────────────────
+            DateTime now = DateTime.UtcNow;
+            long iat = ((DateTimeOffset)now).ToUnixTimeSeconds();
+            long exp = ((DateTimeOffset)now.AddYears(5)).ToUnixTimeSeconds();
+            string jti = $"urn:uuid:{Guid.NewGuid()}";
+
+            // cnf (confirmation) — holder binding ด้วย did:key ของ wallet
+            // walletid มาจาก kid ใน proof JWT (เป็น did:key หรือ did:tbsi)
+            var cnf = new { kid = walletid };
+
+            var payload = new
+            {
+                iss = issuerid,
+                sub = walletid,
+                vct = $"{UrlBase}/credentials/IDCard",
+                jti = jti,
+                iat = iat,
+                exp = exp,
+                institution_name = institutionName,   // Non-SD — แสดงเสมอ
+                _sd = sdHashes,           // hashes ของ SD claims
+                _sd_alg = "sha-256",
+                cnf = cnf,
+                issued = now.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                issuanceDate = now.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+            };
+
+            // ── 6. Sign ด้วย Ed25519 (เหมือน GenerateJWTEd25519 เดิม) ─
+            string header = $"{{\"alg\":\"EdDSA\",\"typ\":\"dc+sd-jwt\",\"kid\":\"{issuerid}\"}}";
+
+            var options = new System.Text.Json.JsonSerializerOptions
+            {
+                WriteIndented = false,
+                Encoder = System.Text.Encodings.Web.JavaScriptEncoder.Default,
+                DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull,
+            };
+
+            string payloadJson = System.Text.Json.JsonSerializer.Serialize(payload, options);
+            string headerB64 = WebEncoders.Base64UrlEncode(Encoding.UTF8.GetBytes(header))
+                .Replace("+", "-") // Replace '+' with '-'
+                .Replace("/", "_") // Replace '/' with '_'
+                .TrimEnd('=');     // Remove padding characters ('=')
+            string payloadB64 = WebEncoders.Base64UrlEncode(Encoding.UTF8.GetBytes(payloadJson));
+            string signingInput = $"{headerB64}.{payloadB64}";
+            byte[] signingBytes = Encoding.UTF8.GetBytes(signingInput);
+
+            var signer = new Ed25519Signer();
+            signer.Init(true, privateKey);
+            signer.BlockUpdate(signingBytes, 0, signingBytes.Length);
+            string encodedSignature = WebEncoders.Base64UrlEncode(signer.GenerateSignature());
+
+
+            // ── 7. ประกอบ SD-JWT string ───────────────────────────────
+            // รูปแบบ: header.payload.sig~disc1~disc2~...~
+            string sdJwt = $"{headerB64}.{payloadB64}.{encodedSignature}";
+            foreach (var disc in disclosures)
+            {
+                sdJwt += $"~{disc}";
+            }
+            sdJwt += "~";   // trailing tilde (ไม่มี KB-JWT ฝั่ง issuer)
+
+            return sdJwt;
+        }
+
         /// <summary>
         /// สร้าง SD-JWT สำหรับ BootCampCredential
         /// claims อ่านจาก credential-configurations-supported.json แบบ dynamic
@@ -1520,6 +1865,167 @@ namespace IssuerAPI.Service
             return node ?? new JsonObject();
         }
 
+
+        public string GenerateDriverLicenseMdoc(string issuerid, string walletid, IWebHostEnvironment _env, byte[] deviceKeyX, byte[] deviceKeyY)
+        {
+            // ── 1. ดึง private key ── ต้องเป็น ECDSA P-256 (ES256) แยกจาก Ed25519 ของ SD-JWT ──
+            //     ISO 18013-5 Table B.1 บังคับ issuerAuth ต้องใช้ ES256/ES384/ES512 เท่านั้น
+            ECDsa issuerKey = LoadEcdsaKey(GetKey(true, _env, keyType: "mdoc-issuer"));
+
+            // ── 2. ดึงข้อมูลใบขับขี่จาก GenerateDriverLicenseVC (แหล่งข้อมูลกลางเดียวกับ SD-JWT) ─
+            var vcResult = GenerateDriverLicenseVC(issuerid, walletid);
+            var vcPayload = vcResult.Value as vcModelDrivingLicence
+                ?? throw new Exception("GenerateDriverLicenseVC failed");
+
+            var subject = vcPayload.vc.credentialSubject;   // _credentialSubjectDrivingLicence
+
+            // ── 3. สร้าง IssuerSignedItem ต่อ data element พร้อม random salt + digest ─
+            var nameSpaceItems = new List<CBORObject>();
+            var digestMap = CBORObject.NewMap();
+            int digestId = 0;
+
+            using var sha256 = SHA256.Create();
+
+            CBORObject AddItem(string elementId, CBORObject value)
+            {
+                byte[] salt = RandomNumberGenerator.GetBytes(16);
+
+                var item = CBORObject.NewMap();
+                item.Add("digestID", digestId);
+                item.Add("random", salt);
+                item.Add("elementIdentifier", elementId);
+                item.Add("elementValue", value);
+
+                // ISO 18013-5 บังคับห่อ item ด้วย CBOR tag 24 (encoded CBOR data item)
+                byte[] itemBytes = item.EncodeToBytes();
+                CBORObject tagged = CBORObject.FromObjectAndTag(itemBytes, 24);
+
+                byte[] digest = sha256.ComputeHash(tagged.EncodeToBytes());
+                digestMap.Add(digestId, digest);
+
+                nameSpaceItems.Add(tagged);
+                digestId++;
+                return tagged;
+            }
+
+            // helper สำหรับแปลง driving_privileges เป็น CBOR array ตาม ISO 18013-5
+            CBORObject BuildDrivingPrivilegesCbor(List<DrivingPrivilege> privileges)
+            {
+                var arr = CBORObject.NewArray();
+                foreach (var p in privileges ?? new List<DrivingPrivilege>())
+                {
+                    var entry = CBORObject.NewMap();
+                    entry.Add("vehicle_category_code", MapCategoryToIsoCode(p.Category));
+                    entry.Add("issue_date", subject.IssueDate);
+                    entry.Add("expiry_date", subject.ExpiryDate);
+                    arr.Add(entry);
+                }
+                return arr;
+            }
+
+            // ── 4. เติม field ตาม namespace org.iso.18013.5.1 ──
+            AddItem("family_name", CBORObject.FromObject(subject.FamilyName));
+            AddItem("given_name", CBORObject.FromObject(subject.GivenName));
+            AddItem("birth_date", CBORObject.FromObject(subject.BirthDate));
+            AddItem("document_number", CBORObject.FromObject(subject.DocumentNumber));
+            AddItem("issue_date", CBORObject.FromObject(subject.IssueDate));
+            AddItem("expiry_date", CBORObject.FromObject(subject.ExpiryDate));
+            AddItem("issuing_country", CBORObject.FromObject(subject.IssuingCountry));
+            AddItem("issuing_authority", CBORObject.FromObject(subject.IssuingAuthority));
+            AddItem("un_distinguishing_sign", CBORObject.FromObject(subject.UnDistinguishingSign));
+            AddItem("driving_privileges", BuildDrivingPrivilegesCbor(subject.DrivingPrivileges));
+            AddItem("sex", CBORObject.FromObject(MapSexToIsoCode(subject.Sex)));
+            AddItem("resident_address", CBORObject.FromObject(subject.ResidentAddress));
+
+            if (!string.IsNullOrEmpty(subject.Portrait))
+            {
+                // portrait ต้องเป็น CBOR byte string (bstr) ไม่ใช่ tstr
+                byte[] portraitBytes = Convert.FromBase64String(subject.Portrait);
+                AddItem("portrait", CBORObject.FromObject(portraitBytes));
+            }
+
+            // ── 5. สร้าง valueDigests + deviceKeyInfo + validityInfo ──
+            var valueDigests = CBORObject.NewMap();
+            valueDigests.Add("org.iso.18013.5.1", digestMap);
+
+            if (deviceKeyX == null || deviceKeyY == null)
+                throw new ArgumentException("deviceKeyX/deviceKeyY are required to bind mdoc to the wallet's device key.");
+
+            var deviceKeyCoseMap = CBORObject.NewMap();
+            deviceKeyCoseMap.Add(1, 2);           // kty: EC2
+            deviceKeyCoseMap.Add(-1, 1);          // crv: P-256
+            deviceKeyCoseMap.Add(-2, deviceKeyX); // x
+            deviceKeyCoseMap.Add(-3, deviceKeyY); // y
+
+            DateTime now = DateTime.UtcNow;
+            var validityInfo = CBORObject.NewMap();
+            validityInfo.Add("signed", now.ToString("yyyy-MM-ddTHH:mm:ssZ"));
+            validityInfo.Add("validFrom", now.ToString("yyyy-MM-ddTHH:mm:ssZ"));
+            validityInfo.Add("validUntil", now.AddYears(10).ToString("yyyy-MM-ddTHH:mm:ssZ"));
+
+            var mso = CBORObject.NewMap();
+            mso.Add("version", "1.0");
+            mso.Add("digestAlgorithm", "SHA-256");
+            mso.Add("docType", "org.iso.18013.5.1.mDL");
+            mso.Add("valueDigests", valueDigests);
+            mso.Add("deviceKeyInfo", CBORObject.NewMap().Add("deviceKey", deviceKeyCoseMap));
+            mso.Add("validityInfo", validityInfo);
+
+            byte[] msoBytes = mso.EncodeToBytes();
+            CBORObject msoTagged = CBORObject.FromObjectAndTag(msoBytes, 24);
+
+            // ── 6. เซ็น MSO ด้วย COSE_Sign1 (ES256) — ใช้ built-in .NET System.Security.Cryptography.Cose ──
+            var protectedHeaders = new CoseHeaderMap();
+            protectedHeaders.Add(CoseHeaderLabel.Algorithm, -8); // -7, ES256
+
+            byte[] issuerAuth = CoseSign1Message.SignEmbedded(
+                embeddedContent: msoTagged.EncodeToBytes(),
+                signer: new CoseSigner(issuerKey, HashAlgorithmName.SHA256, protectedHeaders)
+            );
+
+            // ── 7. ประกอบ IssuerSigned object สุดท้าย ──
+            var nameSpaceArray = CBORObject.NewArray();
+            foreach (var item in nameSpaceItems)
+                nameSpaceArray.Add(item);
+
+            var nameSpacesMap = CBORObject.NewMap();
+            nameSpacesMap.Add("org.iso.18013.5.1", nameSpaceArray);
+
+            var issuerSigned = CBORObject.NewMap();
+            issuerSigned.Add("nameSpaces", nameSpacesMap);
+            issuerSigned.Add("issuerAuth", CBORObject.DecodeFromBytes(issuerAuth));
+
+            byte[] mdocBytes = issuerSigned.EncodeToBytes();
+
+            // ── 8. base64url-encode สำหรับใส่ใน credential response ──
+            return Base64UrlEncode(mdocBytes);
+        }
+
+        // ── Helper: ECDSA P-256 key loader (คนละคู่จาก Ed25519 ของ SD-JWT) ──
+        private ECDsa LoadEcdsaKey(string pem)
+        {
+            ECDsa ecdsa = ECDsa.Create();
+            ecdsa.ImportFromPem(pem);
+            return ecdsa;
+        }
+
+        // ── Helper: mapping sex ตาม ISO 5218 ──
+        private int MapSexToIsoCode(string sex) => sex switch
+        {
+            "ชาย" => 1,
+            "หญิง" => 2,
+            _ => 0
+        };
+
+        // ── Helper: mapping ประเภทรถเป็นรหัส ISO 18013-5 vehicle category ──
+        private string MapCategoryToIsoCode(string thaiCategory)
+        {
+            if (string.IsNullOrEmpty(thaiCategory)) return "B";
+            if (thaiCategory.Contains("รถจักรยานยนต์")) return "A";
+            if (thaiCategory.Contains("รถบรรทุก")) return "C";
+            if (thaiCategory.Contains("รถยนต์ส่วนบุคคล")) return "B";
+            return "B";
+        }
     }
 
 

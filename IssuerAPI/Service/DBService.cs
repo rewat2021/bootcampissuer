@@ -83,35 +83,65 @@ namespace IssuerAPI.Service
             return result;
         }
 
-        public string GetDocumentType(string registerId)
+        public List<string> GetDocumentTypes(string registerId)
         {
-            string result = null;
             using (IssuerDbContext context = new IssuerDbContext())
             {
-                var items = context.Dbrequests.Where(i => i.RegisterId.Equals(registerId)).FirstOrDefault();
+                var item = context.Dbrequests.FirstOrDefault(i => i.RegisterId.Equals(registerId));
 
-                if (items != null)
+                if (item == null || string.IsNullOrEmpty(item.CredentialId))
+                    return new List<string>();
+
+                try
                 {
-                    result = items.CredentialId;
+                    return Newtonsoft.Json.JsonConvert.DeserializeObject<List<string>>(item.CredentialId)
+                           ?? new List<string>();
                 }
-
+                catch (Newtonsoft.Json.JsonException)
+                {
+                    // เผื่อกรณี CredentialId เก่าที่เคยเก็บเป็น plain string เดี่ยว (ไม่ใช่ JSON array)
+                    // ก่อนที่จะปรับ schema มาเป็น List<string> — กัน exception ตอน migrate ข้อมูลเก่า
+                    return new List<string> { item.CredentialId };
+                }
             }
-            return result;
         }
 
-        public void SaveRequestCredential(string guid, string requestvc, string preAuthorizedCode)
+        //public void SaveRequestCredential(string guid, List<string> credentialConfigurationIds, string preAuthorizedCode)
+        //{
+        //    using (IssuerDbContext context = new IssuerDbContext())
+        //    {
+        //        var item = context.Dbrequests.Where(i => i.RegisterId.Equals(guid)).FirstOrDefault();
+        //        if (item == null)
+        //        {
+        //            item = new Dbrequest();
+        //            item.RegisterId = guid;
+        //            item.PreAuthorizedCode = preAuthorizedCode;
+        //            item.CredentialId = requestvc;
+        //            item.CreateDate = DateTime.UtcNow;
+
+        //            context.Dbrequests.Add(item);
+        //            context.SaveChanges();
+        //        }
+        //    }
+        //}
+
+        public void SaveRequestCredential(string guid, List<string> credentialConfigurationIds, string preAuthorizedCode)
         {
+            if (credentialConfigurationIds == null || credentialConfigurationIds.Count == 0)
+                throw new ArgumentException("credentialConfigurationIds must contain at least one value.");
+
             using (IssuerDbContext context = new IssuerDbContext())
             {
-                var item = context.Dbrequests.Where(i => i.RegisterId.Equals(guid)).FirstOrDefault();
+                var item = context.Dbrequests.FirstOrDefault(i => i.RegisterId.Equals(guid));
                 if (item == null)
                 {
-                    item = new Dbrequest();
-                    item.RegisterId = guid;
-                    item.PreAuthorizedCode = preAuthorizedCode;
-                    item.CredentialId = requestvc;
-                    item.CreateDate = DateTime.UtcNow;
-
+                    item = new Dbrequest
+                    {
+                        RegisterId = guid,
+                        PreAuthorizedCode = preAuthorizedCode,
+                        CredentialId = Newtonsoft.Json.JsonConvert.SerializeObject(credentialConfigurationIds), // ["org.iso.18013.5.1.mDL","...sd-jwt"]
+                        CreateDate = DateTime.UtcNow
+                    };
                     context.Dbrequests.Add(item);
                     context.SaveChanges();
                 }
