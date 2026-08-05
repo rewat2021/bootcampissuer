@@ -309,7 +309,7 @@ public class VctTypeMetadataController : ControllerBase
                 Claim("address",     mandatory: true, sd: true, th: "ที่อยู่",          en: "Address"),
                 Claim("expiry_date", mandatory: true,  sd: true,  th: "วันหมดอายุ",      en: "Expiry Date"),
                 Claim("religion", mandatory: true,  sd: true,  th: "ศาสนา",         en: "Religion"),
-                Claim("photo",       mandatory: false, sd: true,  th: "รูปถ่าย",          en: "Photo"),
+                //Claim("photo",       mandatory: false, sd: true,  th: "รูปถ่าย",          en: "Photo"),
             ]
         };
 

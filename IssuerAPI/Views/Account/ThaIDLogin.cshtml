@@ -1,4 +1,4 @@
-﻿
+
 <!doctype html>
 <html lang="th">
 <head>
@@ -64,10 +64,6 @@
             gap: 20px;
         }
 
-            .login-card form {
-                max-width: 620px;
-            }
-
             .login-card .title {
                 text-align: center;
                 color: var(--navy);
@@ -85,69 +81,63 @@
                     letter-spacing: 1px;
                 }
 
-        form {
+        .thaid-panel {
             width: 100%;
-            flex: 1;
+            max-width: 620px;
             display: flex;
             flex-direction: column;
             align-items: center;
+            gap: 28px;
         }
 
-        .fields {
+        .thaid-desc {
+            text-align: center;
+            color: var(--text-gray);
+            font-size: 15px;
+            line-height: 1.6;
+            max-width: 480px;
+        }
+
+        .thaid-btn {
             width: 100%;
-            display: flex;
-            flex-direction: column;
-            gap: 20px;
-            align-items: center;
-        }
-
-        .input-group {
-            width: 579px;
-            max-width: 100%;
-        }
-
-            .input-group input {
-                width: 100%;
-                height: 76px;
-                padding: 0 20px;
-                border: 1.5px solid #cfd4e0;
-                border-radius: 12px;
-                font-size: 14px;
-                outline: none;
-                transition: border-color 0.2s, box-shadow 0.2s;
-            }
-
-                .input-group input:focus {
-                    border-color: var(--blue-light);
-                    box-shadow: 0 0 0 3px rgba(91, 141, 239, 0.2);
-                }
-
-                .input-group input::placeholder {
-                    color: var(--text-gray);
-                }
-
-        .submit-btn {
-            margin-top: 16px;
-            width: 300px;
-            max-width: 100%;
-            height: 55px;
+            max-width: 400px;
+            height: 76px;
             padding: 0 24px;
             border: none;
-            border-radius: 999px;
-            font-size: 14px;
-            font-weight: 500;
+            border-radius: 12px;
+            font-size: 18px;
+            font-weight: 600;
             color: #fff;
             cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 12px;
+            text-decoration: none;
             background: linear-gradient( 90deg, var(--blue-dark) 0%, var(--blue-light) 100% );
             transition: opacity 0.2s, transform 0.1s;
         }
 
-            .submit-btn:hover {
+            .thaid-btn:hover {
                 opacity: 0.92;
             }
 
-            .submit-btn:active {
+            .thaid-btn:active {
                 transform: scale(0.98);
+            }
+
+            .thaid-btn .icon {
+                width: 28px;
+                height: 28px;
+                border-radius: 6px;
+                background: #fff;
+                color: var(--navy);
+                font-weight: 800;
+                font-size: 13px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                flex-shrink: 0;
             }
 
         /* Responsive breakpoints */
@@ -158,12 +148,8 @@
                 gap: 36px;
             }
 
-            .input-group input {
+            .thaid-btn {
                 height: 68px;
-            }
-
-            .submit-btn {
-                height: 52px;
             }
         }
 
@@ -173,11 +159,6 @@
                 padding: 36px 20px;
                 border-radius: 16px;
                 gap: 24px;
-            }
-
-            .input-group input {
-                height: 64px;
-                padding: 0 16px;
             }
 
             header.topbar {
@@ -190,8 +171,9 @@
                 padding: 28px 14px;
             }
 
-            .submit-btn {
-                height: 50px;
+            .thaid-btn {
+                height: 60px;
+                font-size: 16px;
             }
         }
 
@@ -218,29 +200,36 @@
                 <div class="line2">STANDARD VC</div>
             </div>
 
-           
-            @using (Html.BeginForm(new { @class = "login100-form validate-form" }))
-            {
-                @Html.AntiForgeryToken()
-                <input type="hidden" name="ReturnUrl" value="@ViewBag.ReturnUrl" />
-                <input type="hidden" name="documentType" value="@ViewBag.DocumentType" />
-                <div class="fields">
-                    <div class="input-group">
-                        <input type="text"
-                               name="username"
-                               placeholder="Username"
-                               autocomplete="username" />
-                    </div>
-                    <div class="input-group">
-                        <input type="password"
-                               name="password"
-                               placeholder="Password"
-                               autocomplete="current-password" />
-                    </div>
-                </div>
-                <button type="submit" class="submit-btn">เข้าสู่ระบบ</button>
-            }
+            <div class="thaid-panel">
+                <p class="thaid-desc">
+                    กรุณายืนยันตัวตนด้วยแอปพลิเคชัน ThaID เพื่อเข้าสู่ระบบและขอเอกสาร Standard VC
+                </p>
 
+                @{
+                    var returnUrl = ViewBag.ReturnUrl as string;
+                    var documentType = ViewBag.DocumentType as string;
+                    var loginUrl = "/thaiid/login";
+
+                    var queryParams = new System.Collections.Generic.List<string>();
+                    if (!string.IsNullOrWhiteSpace(returnUrl))
+                    {
+                        queryParams.Add("returnUrl=" + Html.Raw(System.Net.WebUtility.UrlEncode(returnUrl)));
+                    }
+                    if (!string.IsNullOrWhiteSpace(documentType))
+                    {
+                        queryParams.Add("documentType=" + Html.Raw(System.Net.WebUtility.UrlEncode(documentType)));
+                    }
+                    if (queryParams.Count > 0)
+                    {
+                        loginUrl += "?" + string.Join("&", queryParams);
+                    }
+                }
+
+                <a href="@loginUrl" class="thaid-btn">
+                    <span class="icon">ID</span>
+                    <span>เข้าสู่ระบบด้วย ThaID</span>
+                </a>
+            </div>
         </div>
     </main>
 </body>

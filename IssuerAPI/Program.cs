@@ -1,4 +1,4 @@
-﻿
+﻿using IssuerAPI.Service;
 using IssuerAPI.Models;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.OpenApi.Models;
@@ -14,7 +14,7 @@ var logger = LogManager.Setup()
 
 var builder = WebApplication.CreateBuilder(args);
 
-
+ThaIDConfig.Configure(builder.Configuration);
 builder.Services.Configure<Oid4VciOptions>(
     builder.Configuration.GetSection("Oid4Vci"));
 
@@ -67,7 +67,7 @@ builder.Services.Configure<ForwardedHeadersOptions>(options =>
 builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
     .AddCookie(options =>
     {
-        options.LoginPath = "/Account/Login";
+        options.LoginPath = "/Account/ThaIDLogin";
         options.LogoutPath = "/Account/Logout";
         options.AccessDeniedPath = "/Account/AccessDenied";
         options.ExpireTimeSpan = TimeSpan.FromMinutes(60);
@@ -75,6 +75,8 @@ builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationSc
         options.Cookie.HttpOnly = true;
         options.Cookie.SecurePolicy = CookieSecurePolicy.SameAsRequest; // ใช้ Always ถ้าบังคับ HTTPS
     });
+
+builder.Services.AddHttpClient<ThaIDAuthService>();
 
 builder.Services.AddControllersWithViews()
     .AddJsonOptions(opts =>
@@ -138,7 +140,7 @@ app.UseAuthorization();
 
 app.MapControllerRoute(
     name: "default",
-    pattern: "{controller=Account}/{action=Login}");
+    pattern: "{controller=Account}/{action=ThaIDLogin}");
 
 app.MapControllers();
 

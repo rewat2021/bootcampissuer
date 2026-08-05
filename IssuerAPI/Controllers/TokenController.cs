@@ -33,7 +33,7 @@ namespace IssuerAPI.Controllers
         public IActionResult Token([FromForm] TokenExchangePreAuthRequest request)
         {
             //case FT.IC.AU.H.I.VB.002 => EUT holder work IssuerVC
-            string key = "sX2CpoKx";
+            string key = string.Empty;
             //logs.Clear();
 
             //get value pre-authorized code from db
@@ -132,25 +132,7 @@ namespace IssuerAPI.Controllers
                     error = item.error
                 });
             }
-            if (request.GrantType != "urn:ietf:params:oauth:grant-type:pre-authorized_code" && !(Uri.IsWellFormedUriString(request.GrantType, UriKind.Absolute)))
-            {
-                var item = new ApiLogs
-                {
-                    message = "Issue VC – Token Exchange (Token Exchange Request Fail ❌)",
-                    status = 400,
-                    error = new List<string> { "grant_type is invalid" }
-                };
-                // logs.Add(JsonSerializer.Serialize(item, new JsonSerializerOptions { WriteIndented = true }));
-                return new JsonResult(new
-                {
-                    message = item.message,
-                    status = item.status,
-                    error = item.error
-                })
-                {
-                    StatusCode = 400
-                };
-            }
+            
             if (!ModelState.IsValid)
             {
                 var item = new ApiLogs

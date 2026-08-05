@@ -265,8 +265,8 @@ namespace IssuerAPI.Models
     {
         Transcript,
         IdCard,
-        DriverLicense,
-        BootCamp
+        DriverLicense
+        //BootCamp
     }
 
     public class GenerateQrResponse
