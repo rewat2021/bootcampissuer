@@ -1860,9 +1860,32 @@ namespace IssuerAPI.Service
             }
 
             var json = await System.IO.File.ReadAllTextAsync(filePath);
-            json = json.Replace("{IssuerUrl}", baseUrl);
-            var node = JsonNode.Parse(json);
-            return node ?? new JsonObject();
+
+            // Bug fix: {IssuerUrl} was substituted with a raw string.Replace, so any character in
+            // baseUrl that needs JSON escaping (a stray '"' or '\' from a malformed/attacker-
+            // influenced Host/X-Forwarded-Host header, before the H-11 trusted-proxy fix) could
+            // corrupt the surrounding JSON string and crash JsonNode.Parse below with an unhandled
+            // exception — exactly the "'/' is invalid after a value" crash seen in production.
+            // baseUrl is now JSON-escaped before being spliced into the template.
+            string escapedBaseUrl = System.Text.Json.JsonSerializer.Serialize(baseUrl);
+            escapedBaseUrl = escapedBaseUrl.Substring(1, escapedBaseUrl.Length - 2); // strip the surrounding quotes JsonSerializer adds
+            json = json.Replace("{IssuerUrl}", escapedBaseUrl);
+
+            // M-01 fix: a malformed credential-configurations-supported.json (bad manual edit, bad
+            // admin update via CredentialConfigController, etc.) must not crash the whole metadata
+            // endpoint with an unhandled 500. Fail closed to an empty configuration set and log
+            // server-side instead.
+            try
+            {
+                var node = JsonNode.Parse(json);
+                return node ?? new JsonObject();
+            }
+            catch (System.Text.Json.JsonException ex)
+            {
+                NLog.LogManager.GetCurrentClassLogger().Error(ex,
+                    "credential-configurations-supported.json is not valid JSON; serving an empty credential_configurations_supported set");
+                return new JsonObject();
+            }
         }
 
 
