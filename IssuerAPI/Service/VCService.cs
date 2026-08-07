@@ -1848,7 +1848,8 @@ namespace IssuerAPI.Service
                 .Replace('/', '_')
                 .TrimEnd('=');
         }
-
+        
+        /*ttt*/
         public async Task<JsonNode> LoadCredentialConfigurationsAsync(IWebHostEnvironment _env, string baseUrl)
         {
             Oid4VciOptions _options = new Oid4VciOptions();
