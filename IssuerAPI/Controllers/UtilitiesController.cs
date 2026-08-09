@@ -1,5 +1,6 @@
 ﻿using IssuerAPI.Models;
 using IssuerAPI.Service;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.WebUtilities;
@@ -67,6 +68,10 @@ namespace IssuerAPI.Controllers
             }
         }
 
+        // C-03: restored at request, now admin-only. These sign with the issuer's own private key /
+        // expose the issuer DID on demand — must never be reachable anonymously. Previously these had
+        // no [Authorize] at all, which is exactly what let anyone impersonate the issuer.
+        [Authorize(Roles = "admin")]
         [Route("/generate-jwt-ed25519")]
         [HttpPost]
         public string GenerateJWTEd25519(string nonce) //, string iss)
@@ -83,10 +88,10 @@ namespace IssuerAPI.Controllers
             var header = new Dictionary<string, string>()
             {
                 {
-                    "alg", "EdDSA" //FT.IC.CI.I.H.IB.013 { default EdDSA}, FT.IC.CI.I.H.IB.017 { none }
+                    "alg", "EdDSA"
                 },
                 {
-                    "typ", "JWT" //FT.IC.CI.I.H.IB.014 { default JWT }, FT.IC.CI.I.H.IB.018 { none }
+                    "typ", "JWT"
                 },
                 {
                     "kid",util.GetDID(_env)
@@ -98,22 +103,22 @@ namespace IssuerAPI.Controllers
                 return "Error";
             }
 
-            if (header["typ"] == "none" || string.IsNullOrEmpty(header["typ"])) //openid4vci-proof+jwt
+            if (header["typ"] == "none" || string.IsNullOrEmpty(header["typ"]))
             {
                 return "Error";
             }
 
-
-            // string url = serv.CheckHttps(HttpContext.Request.GetDisplayUrl());
-            var baseUrl = $"{Request.Scheme}://{Request.Host}";
+            // H-11: use the same canonical issuer base URL as everywhere else, instead of trusting
+            // Request.Scheme/Host directly.
+            var baseUrl = IssuerController.GetBaseUrl(HttpContext, _options);
 
             var payloadData = new Dictionary<string, string>()
             {
                 {
-                    "aud", baseUrl //iss
+                    "aud", baseUrl
                 },
                 {
-                    "iat", ((DateTimeOffset)DateTime.UtcNow).ToUnixTimeSeconds().ToString() //FT.IC.CI.I.H.IB.028 
+                    "iat", ((DateTimeOffset)DateTime.UtcNow).ToUnixTimeSeconds().ToString()
                 },
                 {
                     "nonce",nonce
@@ -141,14 +146,10 @@ namespace IssuerAPI.Controllers
                 {
                     return "Error";
                 }
-
             }
-
-
 
             var headerJson = WebEncoders.Base64UrlEncode(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(header, JsonOptions)));
             var payloadJson = WebEncoders.Base64UrlEncode(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(payloadData, JsonOptions)));
-            //var payloadJson = WebEncoders.Base64UrlEncode(Encoding.UTF8.GetBytes(payload));
 
             var signingString = $"{headerJson}.{payloadJson}";
             var payloadBytes = Encoding.UTF8.GetBytes(signingString);
@@ -163,6 +164,7 @@ namespace IssuerAPI.Controllers
             return jwt;
         }
 
+        [Authorize(Roles = "admin")]
         [HttpPost]
         [Route("/did/create")]
         [Tags("DID")]
@@ -181,8 +183,9 @@ namespace IssuerAPI.Controllers
             }
             catch (Exception ex)
             {
-                logger.Error($"CreateDid error: {ex.Message}");
-                return BadRequest(new { error = ex.Message, status = "400" });
+                // H-04: don't leak ex.Message to the caller, log server-side instead.
+                logger.Error(ex, "CreateDid error");
+                return BadRequest(new { error = "request_failed", status = "400" });
             }
         }
     }

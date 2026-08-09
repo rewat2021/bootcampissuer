@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
+using NLog;
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Security.Cryptography;
@@ -20,6 +21,7 @@ namespace IssuerAPI.Controllers
         private readonly Oid4VciOptions _options;
         private IConfiguration _config;
         private string credentialOfferId = null;
+        private static readonly Logger logger = LogManager.GetCurrentClassLogger();
 
         public TokenController(IConfiguration config, IWebHostEnvironment env, IOptions<Oid4VciOptions> options)
         {
@@ -32,218 +34,74 @@ namespace IssuerAPI.Controllers
         [HttpPost]
         public IActionResult Token([FromForm] TokenExchangePreAuthRequest request)
         {
-            //case FT.IC.AU.H.I.VB.002 => EUT holder work IssuerVC
-            string key = string.Empty;
-            //logs.Clear();
+            // H-12: token responses carry credentials — must never be cached.
+            Response.Headers["Cache-Control"] = "no-store";
+            Response.Headers["Pragma"] = "no-cache";
 
-            //get value pre-authorized code from db
-            DBService dbServ = new DBService();
-            if (string.IsNullOrEmpty(request.PreAuthorizedCode))
+            // H-04: standard OAuth 2.0 (RFC 6749 §5.2) error shape: { error, error_description }.
+            if (string.IsNullOrWhiteSpace(request.GrantType))
             {
-                var item = new ApiLogs
-                {
-                    message = "Issue VC – Token Exchange (Token Exchange Request Fail ❌)",
-                    status = 400,
-                    error = new List<string> { "pre-authorized_code is Require" }
-                };
-                // logs.Add(JsonSerializer.Serialize(item, new JsonSerializerOptions { WriteIndented = true }));
-                return BadRequest(new
-                {
-                    message = item.message,
-                    status = item.status,
-                    error = item.error
-                });
+                return BadRequest(new { error = "invalid_request", error_description = "grant_type is required" });
             }
-            AccessCode accessCode = dbServ.getPreAuthorizedCode(request.PreAuthorizedCode, out string registerId);
-            key = accessCode.authoriseCode;
-            string RegisterId = registerId;
-            string ErrorDetails = null;
-
-            //logs.Add(JsonSerializer.Serialize(new { message = "Accept Request ✅" }, new JsonSerializerOptions { WriteIndented = true }));
-            //logs.Add(JsonSerializer.Serialize(request, new JsonSerializerOptions { WriteIndented = true }));
 
             if (request.GrantType != "urn:ietf:params:oauth:grant-type:pre-authorized_code")
             {
-                // ActionLog.InsertLogAction(AppContextHelper.UserId, AppConstant.Holder, AppConstant.Issuer, "FT.IC.TE.H.I.VB.005", "unsupported_grant_type", "400", key);
-                return BadRequest(new
-                {
-                    message = "unsupported_grant_type",
-                    status = 400,
-                });
+                return BadRequest(new { error = "unsupported_grant_type" });
             }
 
-            // ต้องมี pre-authorized_code
             if (string.IsNullOrWhiteSpace(request.PreAuthorizedCode))
             {
-                // ErrorDetails = System.Text.Json.JsonSerializer.Serialize(new { error = "invalid_request", error_description = "Missing pre-authorized_code" });
-                // ActionLog.InsertLogAction(AppContextHelper.UserId, AppConstant.Holder, AppConstant.Issuer, "FT.IC.TE.H.I.VB.005", ErrorDetails, "400", key);
-                return BadRequest(new
-                {
-                    message = "Missing pre-authorized_code",
-                    status = 400,
-                    error = new List<string> { "invalid_request" }
-                });
+                return BadRequest(new { error = "invalid_request", error_description = "pre-authorized_code is required" });
             }
 
-            /*
-             * รอ ui ว่าต้องมี pin code
-             * if (string.IsNullOrWhiteSpace(request.TxCode))
-            {
-                //ErrorDetails = System.Text.Json.JsonSerializer.Serialize(new { error = "invalid_request", error_description = "tx_code is required" });
-                //ActionLog.InsertLogAction(AppContextHelper.UserId, AppConstant.Holder, AppConstant.Issuer, "FT.IC.TE.H.I.VB.005", ErrorDetails, "400", key);
-                return BadRequest(new
-                {
-                    message = "tx_code is required",
-                    status = 400,
-                    error = new List<string> { "invalid_request" }
-                });
-            }*/
-
-
-            if (request.GrantType == "urn:ietf:params:oauth:grant-type:pre-authorized_code" && string.IsNullOrEmpty(request.PreAuthorizedCode))
-            {
-                var item = new ApiLogs
-                {
-                    message = "Issue VC – Token Exchange (Token Exchange Request Fail ❌)",
-                    status = 400,
-                    error = new List<string> { "pre-authorized_code is Require" }
-                };
-                //logs.Add(JsonSerializer.Serialize(item, new JsonSerializerOptions { WriteIndented = true }));
-                return BadRequest(new
-                {
-                    message = item.message,
-                    status = item.status,
-                    error = item.error
-                });
-            }
-            if (string.IsNullOrEmpty(request.GrantType))
-            {
-                var item = new ApiLogs
-                {
-                    message = "Issue VC – Token Exchange (Token Exchange Request Fail ❌)",
-                    status = 400,
-                    error = new List<string> { "grant_type is Require" }
-                };
-                //logs.Add(JsonSerializer.Serialize(item, new JsonSerializerOptions { WriteIndented = true }));
-                return BadRequest(new
-                {
-                    message = item.message,
-                    status = item.status,
-                    error = item.error
-                });
-            }
-            
             if (!ModelState.IsValid)
             {
-                var item = new ApiLogs
+                return BadRequest(new
                 {
-                    message = "Issue VC – Token Exchange (Token Exchange Request Fail ❌)",
-                    status = 400,
-                    error = ModelState.Values.SelectMany(v => v.Errors).Select(e => e.ErrorMessage).ToList()
-                };
-                //logs.Add(JsonSerializer.Serialize(item, new JsonSerializerOptions { WriteIndented = true }));
-                return new JsonResult(new
-                {
-                    message = item.message,
-                    status = item.status,
-                    error = item.error
-                })
+                    error = "invalid_request",
+                    error_description = string.Join("; ", ModelState.Values.SelectMany(v => v.Errors).Select(e => e.ErrorMessage))
+                });
+            }
+
+            DBService dbServ = new DBService();
+            AccessCode accessCode = dbServ.getPreAuthorizedCode(request.PreAuthorizedCode, out string registerId);
+
+            // C-04: pre-authorized codes must be single-use. getPreAuthorizedCode already refuses to
+            // return a code that's expired or already been consumed (authoriseCode comes back null),
+            // and ConsumePreAuthorizedCode below atomically marks it used so a second /token call with
+            // the same code — even racing in parallel — can't mint a second access token.
+            if (string.IsNullOrEmpty(accessCode?.authoriseCode) || !accessCode.authoriseCode.Equals(request.PreAuthorizedCode))
+            {
+                return new JsonResult(new { error = "invalid_grant", error_description = "pre-authorized_code is invalid, expired, or already used" })
                 {
                     StatusCode = 400
                 };
             }
-            //logs.Add(JsonSerializer.Serialize(new { message = "Return Token ✅" }, new JsonSerializerOptions { WriteIndented = true }));
-            //logs.Add(JsonSerializer.Serialize(new ApiLogs
-            //{
-            //    message = "Issue VC – Token Exchange (Token Exchange Request Pass ✅)",
-            //    status = 200,
-            //    error = new List<string>()
-            //}, new JsonSerializerOptions { WriteIndented = true }));
 
-
-
-            // Validate the pre-authorized code
-            if (string.IsNullOrEmpty(key))
+            bool consumed = dbServ.ConsumePreAuthorizedCode(registerId, request.PreAuthorizedCode);
+            if (!consumed)
             {
-                var item = new ApiLogs
+                // Someone else (or a concurrent retry) consumed it first.
+                return new JsonResult(new { error = "invalid_grant", error_description = "pre-authorized_code is invalid, expired, or already used" })
                 {
-                    error = new List<string> { "Invalid pre-authorized_code" },
-                    message = "Issue VC – Token Exchange (Token Exchange Request Fail ❌)",
-                    status = 401
+                    StatusCode = 400
                 };
-                //logs.Add(JsonSerializer.Serialize(new ApiLogs
-                //{
-                //    message = item.message,
-                //    status = item.status,
-                //    error = item.error
-                //}, new JsonSerializerOptions { WriteIndented = true }));
-                return new JsonResult(Unauthorized(new
-                {
-                    message = item.message,
-                    status = item.status,
-                    error = item.error
-                }));
-            }
-
-            if (!key.Equals(request.PreAuthorizedCode))
-            {
-                var item = new ApiLogs
-                {
-                    error = new List<string> { "Invalid pre-authorized_code" },
-                    message = "Issue VC – Token Exchange (Token Exchange Request Fail ❌)",
-                    status = 401
-                };
-                //logs.Add(JsonSerializer.Serialize(new ApiLogs
-                //{
-                //    message = item.message,
-                //    status = item.status,
-                //    error = item.error
-                //}, new JsonSerializerOptions { WriteIndented = true }));
-                return new JsonResult(Unauthorized(new
-                {
-                    message = item.message,
-                    status = item.status,
-                    error = item.error
-                }));
             }
 
             try
             {
-                // Retrieve the Base64 encoded private key from configuration
                 string privateKeyBase64 = _config["Jwt:PrivateKey"];
                 if (string.IsNullOrEmpty(privateKeyBase64))
                 {
-                    var item = new ApiLogs
-                    {
-                        error = new List<string> { "Private key not configured" },
-                        message = "Issue VC – Token Exchange (Token Exchange Request Fail ❌)",
-                        status = 500
-                    };
-                    //logs.Add(JsonSerializer.Serialize(new ApiLogs
-                    //{
-                    //    message = item.message,
-                    //    status = item.status,
-                    //    error = item.error
-                    //}, new JsonSerializerOptions { WriteIndented = true }));
-                    return StatusCode(500, new
-                    {
-                        message = item.message,
-                        status = item.status,
-                        error = item.error
-                    });
+                    logger.Error("Jwt:PrivateKey not configured");
+                    return StatusCode(500, new { error = "server_error" });
                 }
 
-                // Convert Base64 string back to byte array
                 byte[] privateKeyBytes = Convert.FromBase64String(privateKeyBase64);
-
-                // Create an ECDsa instance with the private key
                 var ecdsa = ECDsa.Create();
                 ecdsa.ImportECPrivateKey(privateKeyBytes, out _);
-
-                // Create a new ECDsaSecurityKey
                 var ecdsaSecurityKey = new ECDsaSecurityKey(ecdsa);
 
-                // Define token parameters
                 var tokenHandler = new JwtSecurityTokenHandler();
 
                 var claims = new List<Claim>
@@ -252,65 +110,70 @@ namespace IssuerAPI.Controllers
                     new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString())
                 };
 
+                // H-13: short-lived access token — 5 minutes is enough for the wallet to immediately
+                // turn around and call /credential; it should not remain usable indefinitely.
+                var tokenLifetime = TimeSpan.FromMinutes(5);
+
                 var tokenDescriptor = new SecurityTokenDescriptor
                 {
                     Subject = new ClaimsIdentity(claims),
-                    Expires = DateTime.UtcNow.AddHours(1),
-                    Audience = $"{_config["Jwt:Issuer"]}/credential", // Set the audience claim here
-                    Issuer = _config["Jwt:Issuer"], // Set the issuer claim here
+                    Expires = DateTime.UtcNow.Add(tokenLifetime),
+                    Audience = $"{_config["Jwt:Issuer"]}/credential",
+                    Issuer = _config["Jwt:Issuer"],
                     SigningCredentials = new SigningCredentials(ecdsaSecurityKey, SecurityAlgorithms.EcdsaSha256)
                 };
 
-                // Create and write the token
                 var token = tokenHandler.CreateToken(tokenDescriptor);
                 string tokenString = tokenHandler.WriteToken(token);
+
+                // C-04 / H-01: c_nonce used to just echo back accessCode.C_Nonce, which is the same
+                // static value as the grant's RegisterId (reused for the life of the grant, never
+                // expired or marked used). Issue a real single-use nonce instead — see
+                // DBService.IssueNonce/TryConsumeNonce, checked when the wallet later calls
+                // /credential.
+                string cNonce = dbServ.IssueNonce();
+
+                // H-07: authorization_details must contain one object per authorized
+                // credential_configuration_id, not the whole stored JSON array dumped into a single
+                // credential_configuration_id string. accessCode.CredentialType is that raw stored
+                // value (Dbrequest.CredentialId — see DBService.SaveRequestCredential /
+                // GetDocumentTypes), a JSON array of the config IDs this grant authorizes. This issuer
+                // doesn't implement per-dataset credential_identifiers (Appendix example shows that as
+                // an additional optional field under one config) — the Credential Request always
+                // selects by credential_configuration_id directly, so authorization_details omits it.
+                List<string> authorizedConfigIds;
+                try
+                {
+                    authorizedConfigIds = Newtonsoft.Json.JsonConvert.DeserializeObject<List<string>>(accessCode.CredentialType)
+                                           ?? new List<string>();
+                }
+                catch (Newtonsoft.Json.JsonException)
+                {
+                    // Legacy rows that predate storing a JSON array (a single bare config id string).
+                    authorizedConfigIds = new List<string> { accessCode.CredentialType };
+                }
 
                 var response = new
                 {
                     access_token = tokenString,
                     token_type = "Bearer",
-                    expires_in = (int)TimeSpan.FromHours(1).TotalSeconds, // Token expiration time in seconds
-                    c_nonce = accessCode.C_Nonce, // Replace with actual nonce value if needed
-                    c_nonce_expires_in = (int)TimeSpan.FromHours(1).TotalSeconds, // Nonce expiration time in seconds
-
-                    authorization_details = new[]
+                    expires_in = (int)tokenLifetime.TotalSeconds,
+                    c_nonce = cNonce,
+                    c_nonce_expires_in = (int)DBService.NonceTtl.TotalSeconds,
+                    authorization_details = authorizedConfigIds.Select(id => new
                     {
-                        new
-                        {
-                            type = "openid_credential",
-                            credential_configuration_id = $"{accessCode.CredentialType}"
-                        }
-                        
-                    }
-
-
+                        type = "openid_credential",
+                        credential_configuration_id = id
+                    }).ToArray()
                 };
 
-
-                //ActionLog.InsertLogAction(AppContextHelper.UserId, AppConstant.Issuer, AppConstant.Holder, null, $"access token => {JsonSerializer.Serialize(response)}", "200", null);
-                //ActionLog.InsertLogAction(AppContextHelper.UserId, AppConstant.Holder, AppConstant.Issuer, "FT.IC.TE.H.I.VB.001, FT.IC.TE.H.I.VB.002, FT.IC.TE.H.I.VB.003", $"access token => {JsonSerializer.Serialize(response)}", "200", null);
-
-
-
                 return Ok(response);
-                //return new JsonResult(new { response });
             }
             catch (Exception ex)
             {
-
-                var item = new ApiLogs
-                {
-                    message = "Issue VC – Token Exchange (Token Exchange Request Fail ❌)",
-                    status = 500,
-                    error = new List<string> { ex.Message }
-                };
-                //  logs.Add(JsonSerializer.Serialize(item, new JsonSerializerOptions { WriteIndented = true }));
-                return StatusCode(500, new
-                {
-                    message = item.message,
-                    status = item.status,
-                    error = item.error,
-                });
+                // H-04: don't leak ex.Message to the caller.
+                logger.Error(ex, "Token exchange failed");
+                return StatusCode(500, new { error = "server_error" });
             }
         }
     }

@@ -122,10 +122,18 @@ namespace IssuerAPI.Models
     public class IssuanceRequest
     {
         public string? credential_configuration_id { get; set; }//credential_identifier { get; set; }
-        public Proof? proof { get; set; }
+
+        // C-01 / H-01: OID4VCI 1.0 Final §8.2 — the only proof parameter the spec defines is
+        // "proofs": { "jwt": ["..."] }. No "proof" (singular) fallback — spec-exact per request.
+        public ProofsContainer? proofs { get; set; }
         //public string? format { get; set; }
-       
+
         //public CredentialResponseEncryption? credential_response_encryption { get; set; }
+    }
+
+    public class ProofsContainer
+    {
+        public List<string>? jwt { get; set; }
     }
 
     public class IssueVcRequest

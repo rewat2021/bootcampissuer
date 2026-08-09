@@ -363,3 +363,17 @@ MigrationBackup/
 FodyWeavers.xsd
 
 .env
+
+# C-06: runtime-generated key material / DB credentials must never be committed.
+IssuerAPI/privateKey.txt
+IssuerAPI/publicKey.txt
+IssuerAPI/DID.txt
+IssuerAPI/command.txt
+**/privateKey.txt
+**/publicKey.txt
+**/DID.txt
+**/appsettings.*.local.json
+
+# C-06: launchSettings.json now carries a real local-dev DB connection string (CONNECTION_STRING).
+# This file is per-developer by convention and should not be committed with real credentials in it.
+**/Properties/launchSettings.json

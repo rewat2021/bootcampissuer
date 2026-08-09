@@ -55,8 +55,23 @@ builder.Services.Configure<ForwardedHeadersOptions>(options =>
         ForwardedHeaders.XForwardedProto |
         ForwardedHeaders.XForwardedHost;
 
-    options.KnownNetworks.Clear();
-    options.KnownProxies.Clear();
+    // H-11: clearing KnownNetworks/KnownProxies makes ASP.NET Core trust X-Forwarded-* from ANY
+    // caller, so an attacker hitting the app directly (bypassing the real reverse proxy) could spoof
+    // X-Forwarded-Host/Proto and influence baseUrl (issuer identifier, redirect targets, credential
+    // "iss"/"sub" URLs, etc). Only trust forwarded headers from proxy IPs listed in config
+    // (ReverseProxy:KnownProxies, e.g. the IIS/nginx box in front of Kestrel). If nothing is
+    // configured, fall back to framework defaults (loopback only) rather than "trust everyone".
+    var knownProxies = builder.Configuration.GetSection("ReverseProxy:KnownProxies").Get<string[]>();
+    if (knownProxies != null)
+    {
+        foreach (var ip in knownProxies)
+        {
+            if (System.Net.IPAddress.TryParse(ip, out var addr))
+            {
+                options.KnownProxies.Add(addr);
+            }
+        }
+    }
 });
 
 //builder.Services.AddAuthentication("IssuerCookie")

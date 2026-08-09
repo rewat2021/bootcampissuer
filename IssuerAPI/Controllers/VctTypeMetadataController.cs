@@ -173,7 +173,9 @@ public class VctTypeMetadataController : ControllerBase
                 return NotFound(new { error = "BootCampCredential_dc+sd-jwt not found" });
 
             var claims = new List<ClaimMetadata>();
-            var claimsNode = credentialConfig["claims"];
+            // H-06: claims now live under credential_metadata.claims (OID4VCI 1.0 Final Appendix B.2
+            // array format); fall back to a legacy top-level "claims" for older config entries.
+            var claimsNode = credentialConfig["credential_metadata"]?["claims"] ?? credentialConfig["claims"];
 
             // Object: { "fullname": { "mandatory": true, ... } }
             if (claimsNode is JsonObject claimsObj)
@@ -420,6 +422,9 @@ public class VctTypeMetadataController : ControllerBase
 
         string json = await System.IO.File.ReadAllTextAsync(path);
         var config = JsonNode.Parse(json)?.AsObject();
+        // H-06: prefer credential_metadata.claims (array format); note this helper's return type
+        // (JsonObject?) only fits the legacy top-level object shape — kept as-is since this method is
+        // currently unused (dead code), flagging so it isn't silently relied upon without a rewrite.
         return config?[credentialTypeKey]?["claims"]?.AsObject();
     }
 

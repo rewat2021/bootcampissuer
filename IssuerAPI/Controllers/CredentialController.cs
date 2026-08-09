@@ -1,4 +1,4 @@
-﻿using IssuerAPI.Models;
+using IssuerAPI.Models;
 using IssuerAPI.Service;
 using IssuerAPI.Util;
 using Microsoft.AspNetCore.Authorization;
@@ -32,7 +32,7 @@ namespace IssuerAPI.Controllers
         private IConfiguration _config;
         private string credentialOfferId = null;
         private static readonly Logger logger = LogManager.GetCurrentClassLogger();
-        private string urlBase => $"{Request.Scheme}://{Request.Host}";
+        private string urlBase => IssuerController.GetBaseUrl(HttpContext, _options);
 
         public CredentialController(IConfiguration config, IWebHostEnvironment env, IOptions<Oid4VciOptions> options)
         {
@@ -45,45 +45,64 @@ namespace IssuerAPI.Controllers
         [Route("/credential")]
         public IActionResult Credential([FromBody] IssuanceRequest request)
         {
+            // H-12: credential responses carry key material / PII — must never be cached.
+            Response.Headers["Cache-Control"] = "no-store";
+            Response.Headers["Pragma"] = "no-cache";
+
             VCService serv = new VCService();
             DBService dbServ = new DBService();
-            string proof = request.proof.jwt;
-            string registerId = serv.getProofByNonce(proof);
+
+            // H-01: OID4VCI 1.0 Final §8.2 — exactly one proof, submitted as proofs.jwt[0]. Spec-exact,
+            // no pre-final "proof" singular fallback.
+            List<string> proofJwts = request.proofs?.jwt;
+            if (proofJwts == null || proofJwts.Count != 1 || string.IsNullOrWhiteSpace(proofJwts[0]))
+            {
+                return BadRequest(new { error = "invalid_proof", error_description = "exactly one proofs.jwt entry is required" });
+            }
+            string proof = proofJwts[0];
+
+            // C-02: resolve registerId from the *verified* access token's "sub" claim, not from an
+            // unauthenticated value pulled out of the proof. Previously the proof's own "nonce" claim
+            // was used as a database lookup key for the grant, and the token was only checked against
+            // that result afterward — i.e. the proof (unauthenticated at this point) picked which
+            // grant to use, and the token merely rubber-stamped it. The token is now the sole source
+            // of truth for which grant this request belongs to; the proof's "nonce" claim is checked
+            // purely for freshness/replay further down, after its signature is verified.
+            var authorizationHeader = HttpContext.Request.Headers["Authorization"].FirstOrDefault();
+            if (authorizationHeader == null || !authorizationHeader.StartsWith("Bearer "))
+            {
+                return Unauthorized(new { error = "invalid_token", error_description = "Authorization header is either missing or invalid." });
+            }
+            var token = authorizationHeader.Substring("Bearer ".Length).Trim();
+            string registerId = serv.ValidateTokenAndGetSubject(_config, token);
+            if (registerId == null)
+            {
+                return Unauthorized(new { error = "invalid_token", error_description = "Token is invalid or expired" });
+            }
+
             string walletid = null;
             string vcFormat = null;
 
             logger.Info("Start Credential");
             logger.Info($"registerid => {registerId}");
-            logger.Info($"proof => {request.proof}");
 
-            // ✅ ยังคงดึงมาเป็น List<string> เหมือนเดิม — คือ "รายการที่ authorize ไว้ทั้งหมด"
+            // ยังคงดึงมาเป็น List<string> เหมือนเดิม — คือ "รายการที่ authorize ไว้ทั้งหมด"
             List<string> allowedDocTypes = dbServ.GetDocumentTypes(registerId);
             if (allowedDocTypes == null || allowedDocTypes.Count == 0)
             {
-                return BadRequest(new
-                {
-                    message = "Issue VC – VC Issuance Request Fail, not found Document Type",
-                    status = 400,
-                });
+                return BadRequest(new { error = "invalid_credential_request", error_description = "no document type authorized for this request" });
             }
 
             if (!ModelState.IsValid)
             {
-                var item = new ApiLogs
-                {
-                    message = "Issue VC – VC Issuance Request Fail ❌)",
-                    status = 400,
-                    error = ModelState.Values.SelectMany(v => v.Errors).Select(e => e.ErrorMessage).ToList()
-                };
                 return BadRequest(new
                 {
-                    message = item.message,
-                    status = item.status,
-                    error = item.error
+                    error = "invalid_request",
+                    error_description = string.Join("; ", ModelState.Values.SelectMany(v => v.Errors).Select(e => e.ErrorMessage))
                 });
             }
 
-            // ── ✅ เลือก 1 config id จาก request — ไม่ใช่เอา list มาทั้งก้อน ──
+            // ── เลือก 1 config id จาก request — ไม่ใช่เอา list มาทั้งก้อน ──
             logger.Info($"credential_configuration_id (from request) => {request.credential_configuration_id}");
 
             string selectedDocType;
@@ -100,113 +119,94 @@ namespace IssuerAPI.Controllers
                 {
                     return BadRequest(new
                     {
-                        message = "credential_configuration_id is required when multiple formats are available",
-                        status = 400,
-                        available = allowedDocTypes
+                        error = "invalid_credential_request",
+                        error_description = "credential_configuration_id is required when multiple formats are available"
                     });
                 }
             }
             else
             {
-                // ✅ ตรวจว่า id ที่ wallet ขอมา อยู่ใน list ที่ authorize ไว้จริงไหม
+                // ตรวจว่า id ที่ wallet ขอมา อยู่ใน list ที่ authorize ไว้จริงไหม
                 selectedDocType = allowedDocTypes.FirstOrDefault(d => d == request.credential_configuration_id);
 
                 if (selectedDocType == null)
                 {
                     return BadRequest(new
                     {
-                        message = $"credential_configuration_id '{request.credential_configuration_id}' is not authorized for this request",
-                        status = 400,
-                        available = allowedDocTypes
+                        error = "invalid_credential_request",
+                        error_description = $"credential_configuration_id '{request.credential_configuration_id}' is not authorized for this request"
                     });
                 }
             }
 
             logger.Info($"selectedDocType => {selectedDocType}");
 
-            // Authorization header check (เดิม ไม่เปลี่ยน)
-            var authorizationHeader = HttpContext.Request.Headers["Authorization"].FirstOrDefault();
-            if (authorizationHeader == null || !authorizationHeader.StartsWith("Bearer "))
-            {
-                var item = new ApiLogs
-                {
-                    message = "Issue VC – VC Issuance Request Fail ❌",
-                    status = 401,
-                    error = new List<string> { "Authorization header is either missing or invalid." }
-                };
-                return Unauthorized(item);
-            }
-
-            var token = authorizationHeader.Substring("Bearer ".Length).Trim();
-            bool isValid = serv.IsTokenValid(_config, token);
-            if (!isValid)
-            {
-                var item = new ApiLogs
-                {
-                    message = "Issue VC – VC Issuance Request Fail ❌",
-                    status = 401,
-                    error = new List<string> { "Token is invalid" }
-                };
-                return Unauthorized(item);
-            }
-
             string _credential = null;
             string _nonce = null;
             string issuerid = null;
-            JsonResult jResult = null;
 
             try
             {
-                string jwt = request.proof.jwt;
+                string jwt = proof;
                 string[] parts = jwt.Split('.');
+                if (parts.Length != 3)
+                {
+                    return BadRequest(new { error = "invalid_proof", error_description = "proof JWT is malformed" });
+                }
+
                 string headerJson = serv.Base64UrlDecodeToString(parts[0]);
-                logger.Info($">>> proof header: {headerJson}");
                 using JsonDocument doc = JsonDocument.Parse(headerJson);
-                string kid = doc.RootElement.GetProperty("kid").GetString();
 
-                string alg = doc.RootElement.GetProperty("alg").GetString();
-                logger.Info($">>> alg value: '{alg}'");
-                if (string.IsNullOrEmpty(alg))
+                // C-03 (proof header hygiene): reject x5c — nothing in this issuer trusts a caller-
+                // supplied certificate chain. "jwk" is allowed: for mso_mdoc issuance the wallet
+                // conveys its separate P-256 device key this way (ISO 18013-5 requires ES256/P-256 for
+                // device-key binding, which the wallet's Ed25519 did:key cannot provide). Note this
+                // does NOT weaken proof signature verification — the signature below is still checked
+                // exclusively against the did:key resolved from "kid", never against this "jwk".
+                if (doc.RootElement.TryGetProperty("x5c", out _))
                 {
-                    return BadRequest(new { credential = _credential, c_nonce = _nonce, statustext = "invalid encryption parameters alg", status = "400" });
+                    return BadRequest(new { error = "invalid_proof", error_description = "x5c proof header is not supported" });
                 }
 
-                List<string> alglist = new List<string> { "EdDSA", "ES256", "ES256K", "RS256", "none" };
-                if (!alglist.Contains(alg))
+                if (!doc.RootElement.TryGetProperty("kid", out JsonElement kidElement) || string.IsNullOrEmpty(kidElement.GetString()))
                 {
-                    return BadRequest(new { credential = _credential, c_nonce = _nonce, statustext = "invalid encryption parameters, type alg mis value", status = "400" });
+                    return BadRequest(new { error = "invalid_proof", error_description = "kid header is required" });
+                }
+                string kid = kidElement.GetString();
+
+                // Appendix F.1: alg MUST NOT be "none", and must be an algorithm the issuer actually
+                // implements verification for. This issuer only ever asks holders to sign with EdDSA.
+                string alg = doc.RootElement.TryGetProperty("alg", out JsonElement algElement) ? algElement.GetString() : null;
+                if (string.IsNullOrEmpty(alg) || !string.Equals(alg, "EdDSA", StringComparison.Ordinal))
+                {
+                    return BadRequest(new { error = "invalid_proof", error_description = "unsupported or missing proof alg (EdDSA required)" });
                 }
 
-                string typ = doc.RootElement.GetProperty("typ").GetString();
-                if (string.IsNullOrEmpty(typ))
+                // Appendix F.1: typ MUST be openid4vci-proof+jwt.
+                string typ = doc.RootElement.TryGetProperty("typ", out JsonElement typElement) ? typElement.GetString() : null;
+                if (!string.Equals(typ, "openid4vci-proof+jwt", StringComparison.Ordinal))
                 {
-                    return BadRequest(new { credential = _credential, c_nonce = _nonce, statustext = "invalid encryption parameters typ", status = "400" });
-                }
-
-                List<string> typlist = new List<string> { "JWT", "jwt", "openid4vci-proof+jwt" };
-                if (!typlist.Contains(typ))
-                {
-                    return BadRequest(new { credential = _credential, c_nonce = _nonce, statustext = "invalid encryption parameters typ, must be JWT", status = "400" });
+                    return BadRequest(new { error = "invalid_proof", error_description = "typ must be openid4vci-proof+jwt" });
                 }
 
                 string payloadJson = serv.Base64UrlDecodeToString(parts[1]);
                 using JsonDocument docPayload = JsonDocument.Parse(payloadJson);
-                string aud = docPayload.RootElement.GetProperty("aud").GetString();
-                List<string> audlist = new List<string> { "none", "-" };
-
-                if (string.IsNullOrEmpty(aud) || audlist.Contains(aud))
-                {
-                    return BadRequest(new { credential = _credential, c_nonce = _nonce, statustext = "the aud parameters is not set", status = "400" });
-                }
-
-                bool isValidUrl = Uri.TryCreate(aud, UriKind.Absolute, out Uri uriResult)
-                          && (uriResult.Scheme == Uri.UriSchemeHttp || uriResult.Scheme == Uri.UriSchemeHttps);
-                if (!isValidUrl)
-                {
-                    return BadRequest(new { credential = _credential, c_nonce = _nonce, statustext = "the aud parameters is invalid", status = "400" });
-                }
-
                 JsonElement root = docPayload.RootElement;
+
+                // Appendix F.1: "iss" MUST NOT be present for a pre-authorized-code flow without a
+                // client_id (this issuer never hands out a client_id to wallets).
+                if (root.TryGetProperty("iss", out JsonElement issElement) && issElement.ValueKind != JsonValueKind.Null)
+                {
+                    return BadRequest(new { error = "invalid_proof", error_description = "iss must not be set" });
+                }
+
+                // Appendix F.1: "aud" MUST equal the credential issuer identifier exactly.
+                string aud = root.TryGetProperty("aud", out JsonElement audElement) ? audElement.GetString() : null;
+                if (string.IsNullOrEmpty(aud) || !string.Equals(aud, urlBase, StringComparison.Ordinal))
+                {
+                    return BadRequest(new { error = "invalid_proof", error_description = "aud does not match credential issuer identifier" });
+                }
+
                 long striat = 0;
                 if (root.TryGetProperty("iat", out JsonElement iatElement) && iatElement.ValueKind != JsonValueKind.Null)
                 {
@@ -215,31 +215,58 @@ namespace IssuerAPI.Controllers
                         : iatElement.GetInt64();
                 }
 
-                string iat = striat == 0 ? null : striat.ToString();
-                if (string.IsNullOrEmpty(iat) || audlist.Contains(iat))
+                if (striat == 0 || !serv.IsValidNumericDate(striat))
                 {
-                    return BadRequest(new { credential = _credential, c_nonce = _nonce, statustext = "the iat parameters is not set", status = "400" });
-                }
-
-                try
-                {
-                    bool isValid_iat = serv.IsValidNumericDate(long.Parse(iat));
-                    if (!isValid_iat)
-                    {
-                        return BadRequest(new { credential = _credential, c_nonce = _nonce, statustext = "the iat parameters is invalid", status = "400" });
-                    }
-                }
-                catch
-                {
-                    return BadRequest(new { credential = _credential, c_nonce = _nonce, statustext = "the iat parameters is invalid", status = "400" });
+                    return BadRequest(new { error = "invalid_proof", error_description = "iat is missing, stale, or in the future" });
                 }
 
                 walletid = kid.Split('#')[0];
                 issuerid = serv._GetDID(_env);
 
+                // C-01: decode the wallet's did:key (from kid) and actually verify the proof JWT
+                // signature against it. Previously *any* syntactically valid JWT was accepted — the
+                // signature bytes were never checked, so anyone could forge a proof for any wallet.
+                byte[] holderPublicKey = serv.DecodeEd25519DidKey(walletid);
+                if (holderPublicKey == null)
+                {
+                    return BadRequest(new { error = "invalid_proof", error_description = "kid is not a valid did:key" });
+                }
+
+                bool sigOk = serv.VerifyEd25519Jws(jwt, holderPublicKey, out string proofVerifyError);
+                if (!sigOk)
+                {
+                    logger.Warn($"proof JWT signature verification failed: {proofVerifyError}");
+                    return BadRequest(new { error = "invalid_proof", error_description = "proof JWT signature verification failed" });
+                }
+
+                // C-04 / H-01: the proof's "nonce" claim must be a server-issued nonce (from /nonce or
+                // /token's c_nonce) that hasn't expired or already been spent. Consumed here — after
+                // signature verification, so an attacker without a valid holder signature can't burn
+                // through nonces as a denial-of-service against the legitimate wallet — and before any
+                // credential is generated, so a replayed proof (same nonce reused) is rejected
+                // regardless of which credential_configuration_id it's replayed against.
+                string proofNonce = root.TryGetProperty("nonce", out JsonElement nonceElement) ? nonceElement.GetString() : null;
+                if (string.IsNullOrWhiteSpace(proofNonce))
+                {
+                    return BadRequest(new { error = "invalid_proof", error_description = "nonce is required" });
+                }
+                if (!dbServ.TryConsumeNonce(proofNonce))
+                {
+                    return BadRequest(new { error = "invalid_proof", error_description = "nonce is invalid, expired, or already used" });
+                }
+
+                // C-02: this specific (grant, credential_configuration_id) pair may be issued at most
+                // once. The nonce check above already blocks literal proof replay; this blocks a
+                // *fresh*, validly-signed, fresh-nonce request for a configuration this grant already
+                // redeemed. Checked after the nonce is spent so a rejected duplicate doesn't leave the
+                // nonce reusable.
+                if (!dbServ.TryMarkIssued(registerId, selectedDocType))
+                {
+                    return BadRequest(new { error = "invalid_credential_request", error_description = "this credential configuration has already been issued for this grant" });
+                }
+
                 logger.Info($"selectedDocType => {selectedDocType}");
 
-                // ── ✅ ใช้ selectedDocType (string เดี่ยว) แทน vcDocType (list) ──
                 if (selectedDocType.EndsWith("dc+sd-jwt"))
                 {
                     _credential = selectedDocType switch
@@ -254,8 +281,42 @@ namespace IssuerAPI.Controllers
                 }
                 else if (selectedDocType == "org.iso.18013.5.1.mDL")
                 {
-                    // ✅ เพิ่ม branch สำหรับ mdoc ที่ยังไม่มีในโค้ดเดิมเลย
-                    _credential = serv.GenerateDriverLicenseMdoc(issuerid, walletid, _env, /* deviceKeyX, deviceKeyY จาก proof JWK */ null, null);
+                    // H-08 (fixed): the device key MUST come from the wallet's own proof, never be
+                    // null/fabricated. cryptographic_binding_methods_supported for this format is
+                    // "cose_key" (Appendix A.2.2) — ISO 18013-5 requires an EC P-256 device key, which
+                    // is why the wallet includes a "jwk" alongside "kid" in the proof header (the
+                    // proof JWT itself is still Ed25519-signed and verified via "kid" above; "jwk" only
+                    // conveys the separate device key to bind into the mdoc, it is not trusted for
+                    // anything else).
+                    if (!doc.RootElement.TryGetProperty("jwk", out JsonElement jwkElement))
+                    {
+                        return BadRequest(new { error = "invalid_proof", error_description = "jwk header (P-256 device key) is required for mso_mdoc" });
+                    }
+
+                    string kty = jwkElement.TryGetProperty("kty", out JsonElement ktyEl) ? ktyEl.GetString() : null;
+                    string crv = jwkElement.TryGetProperty("crv", out JsonElement crvEl) ? crvEl.GetString() : null;
+                    if (!string.Equals(kty, "EC", StringComparison.Ordinal) || !string.Equals(crv, "P-256", StringComparison.Ordinal))
+                    {
+                        return BadRequest(new { error = "invalid_proof", error_description = "jwk must be an EC P-256 key for mso_mdoc" });
+                    }
+
+                    byte[] deviceKeyX, deviceKeyY;
+                    try
+                    {
+                        deviceKeyX = WebEncoders.Base64UrlDecode(jwkElement.GetProperty("x").GetString());
+                        deviceKeyY = WebEncoders.Base64UrlDecode(jwkElement.GetProperty("y").GetString());
+                    }
+                    catch
+                    {
+                        return BadRequest(new { error = "invalid_proof", error_description = "jwk x/y are missing or malformed" });
+                    }
+
+                    if (deviceKeyX.Length != 32 || deviceKeyY.Length != 32)
+                    {
+                        return BadRequest(new { error = "invalid_proof", error_description = "jwk x/y must be 32-byte P-256 coordinates" });
+                    }
+
+                    _credential = serv.GenerateDriverLicenseMdoc(issuerid, walletid, _env, deviceKeyX, deviceKeyY);
                     _nonce = registerId;
                 }
                 else
@@ -267,13 +328,12 @@ namespace IssuerAPI.Controllers
                         _ => throw new Exception($"Unsupported credential type: {selectedDocType}")
                     };
 
-                    jResult = data;
-                    var options = new JsonSerializerOptions
+                    var jsonOptions = new JsonSerializerOptions
                     {
                         WriteIndented = false,
                         Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
                     };
-                    string json = JsonSerializer.Serialize(data.Value, options);
+                    string json = JsonSerializer.Serialize(data.Value, jsonOptions);
 
                     PemReader pemReaderPrivate = new PemReader(new StringReader(serv.GetKey(true, _env)));
                     Ed25519PrivateKeyParameters privateKeyEd25519 = (Ed25519PrivateKeyParameters)pemReaderPrivate.ReadObject();
@@ -284,445 +344,30 @@ namespace IssuerAPI.Controllers
                 vcFormat = selectedDocType == "org.iso.18013.5.1.mDL" ? "mso_mdoc"
                          : selectedDocType.EndsWith("dc+sd-jwt") ? "dc+sd-jwt"
                          : "jwt_vc_json";
-
                 logger.Info($"format => {vcFormat}");
             }
             catch (Exception e)
             {
-                var error = new
-                {
-                    format = vcFormat,
-                    credential = _credential,
-                    c_nonce = _nonce,
-                    statustext = $"{e.Message}, {e.InnerException}",
-                    status = "400",
-                    msg = jResult
-                };
-
+                // H-04: don't leak exception details (e.Message/InnerException) to callers.
+                logger.Error(e, "Credential issuance failed");
                 dbServ.SaveIssueVCLog(issuerid, walletid, _nonce, _credential, vcFormat, "failed");
-                return BadRequest(error);
+                return BadRequest(new { error = "credential_request_denied", error_description = "the credential request could not be processed" });
             }
 
+            // H-03: final Credential Response shape — a "credentials" array of {credential}, no
+            // legacy top-level format/c_nonce/status/notification_id fields.
             var res = new
             {
-                format = vcFormat,
-                credential = _credential,
-                c_nonce = _nonce,
-                c_nonce_expires = 86400,
-                notification_id = "",
-                status = "200",
+                credentials = new[] { new { credential = _credential } }
             };
 
-            logger.Info(JsonSerializer.Serialize(res));
             dbServ.SaveIssueVCLog(issuerid, walletid, _nonce, _credential, vcFormat, "success");
             return Ok(res);
         }
 
-        /*{
-            //logs.Add(JsonSerializer.Serialize(new { message = "Accept Request ✅" }, new JsonSerializerOptions { WriteIndented = true }));
-            VCService serv = new VCService();
-            DBService dbServ = new DBService();
-            string proof = request.proof.jwt;
-            string registerId = serv.getProofByNonce(proof);
-            string walletid = null;
-            string vcFormat = null;
-
-            logger.Info("Start Credential");
-            logger.Info($"registerid => {registerId}");
-            logger.Info($"proof => {request.proof}");
-
-            List<string> vcDocType = dbServ.GetDocumentTypes(registerId);
-            if (vcDocType == null)
-            {
-                return BadRequest(new
-                {
-                    message = "Issue VC – VC Issuance Request Fail, not found Document Type",
-                    status = 400,
-                });
-            }
-            //Request.Headers.TryGetValue("UserId", out var clientId);
-            //AppContextHelper.UserId = AppContextHelper.UserId == null ? clientId : AppContextHelper.UserId;
-            //AppContextHelper.UserId = AppContextHelper.UserId == null ? registerId : AppContextHelper.UserId;
-            //logs.Add(JsonSerializer.Serialize(request, new JsonSerializerOptions { WriteIndented = true }));
-
-            if (!ModelState.IsValid)
-            {
-                var item = new ApiLogs
-                {
-                    message = "Issue VC – VC Issuance Request Fail ❌)",
-                    status = 400,
-                    error = ModelState.Values.SelectMany(v => v.Errors).Select(e => e.ErrorMessage).ToList()
-                };
-                //logs.Add(JsonSerializer.Serialize(item, new JsonSerializerOptions { WriteIndented = true }));
-                //ActionLog.InsertLogAction(AppContextHelper.UserId, AppConstant.Holder, AppConstant.Issuer, "FT.IC.AU.H.I.VB.002, FT.IC.CI.H.I.VB.010", $"Error validate => {JsonSerializer.Serialize(item)}", "400", null);
-                return BadRequest(new
-                {
-                    message = item.message,
-                    status = item.status,
-                    error = item.error
-                });
-            }
-
-
-
-            // แทนที่ block เดิมที่ return BadRequest
-            logger.Info($"credential_configuration_id => {request.credential_configuration_id}");
-            if (string.IsNullOrEmpty(request.credential_configuration_id))
-            {
-                request.credential_configuration_id = vcDocType; // fallback จาก DB
-            }
-            logger.Info($"credential_configuration_id => {request.credential_configuration_id}");
-
-            //logs.Add(JsonSerializer.Serialize(request, new JsonSerializerOptions { WriteIndented = true }));
-            // Retrieve the Authorization header
-            var authorizationHeader = HttpContext.Request.Headers["Authorization"].FirstOrDefault();
-
-            if (authorizationHeader == null || !authorizationHeader.StartsWith("Bearer "))
-            {
-                var item = new ApiLogs
-                {
-                    message = "Issue VC – VC Issuance Request Fail ❌",
-                    status = 401,
-                    error = new List<string> { "Authorization header is either missing or invalid." }
-                };
-                //logs.Add(JsonSerializer.Serialize(item, new JsonSerializerOptions { WriteIndented = true }));
-                return Unauthorized(item);
-            }
-
-            // Extract the token part
-            var token = authorizationHeader.Substring("Bearer ".Length).Trim();
-
-            // Here you can validate the token using your custom validation logic
-            bool isValid = serv.IsTokenValid(_config, token); // Replace with your validation method
-
-            if (!isValid)
-            {
-                var item = new ApiLogs
-                {
-                    message = "Issue VC – VC Issuance Request Fail ❌",
-                    status = 401,
-                    error = new List<string> { "Token is invalid" }
-                };
-                //logs.Add(JsonSerializer.Serialize(item, new JsonSerializerOptions { WriteIndented = true }));
-                return Unauthorized(item);
-            }
-            //logs.Add(JsonSerializer.Serialize(new { message = "Return VC ✅" }, new JsonSerializerOptions { WriteIndented = true }));
-            //logs.Add(JsonSerializer.Serialize(new ApiLogs
-            //{
-            //    message = "Issue VC – VC Issuance Request Pass ✅",
-            //    status = 200,
-            //    error = ModelState.Values.SelectMany(v => v.Errors).Select(e => e.ErrorMessage).ToList()
-            //}, new JsonSerializerOptions { WriteIndented = true }));
-
-            string _credential = null;
-            string _nonce = null;
-
-            string issuerid = null;
-            JsonResult jResult = null;
-            try
-            {
-
-                string jwt = request.proof.jwt;
-                string[] parts = jwt.Split('.');
-                // Decode the header and payload
-                string headerJson = serv.Base64UrlDecodeToString(parts[0]);
-                Console.WriteLine($">>> proof header: {headerJson}"); // ดู log ใน docker
-                logger.Info($">>> proof header: {headerJson}");
-                using JsonDocument doc = JsonDocument.Parse(headerJson);
-                string kid = doc.RootElement.GetProperty("kid").GetString();
-
-                //check field alg
-                string alg = doc.RootElement.GetProperty("alg").GetString();
-                Console.WriteLine($">>> alg value: '{alg}'");
-                logger.Info($">>> alg value: '{alg}'");
-                if (string.IsNullOrEmpty(alg))
-                {
-                    var error = new
-                    {
-                        credential = _credential,
-                        c_nonce = _nonce,
-                        statustext = "invalid encryption parameters alg",
-                        status = "400",
-                    };
-                    //ActionLog.InsertLogAction(AppContextHelper.UserId, AppConstant.Issuer, AppConstant.Holder, "FT.IC.CI.I.H.IB.013", JsonSerializer.Serialize(error), "400", null);
-                    return BadRequest(error);
-                }
-
-                //ActionLog.InsertLogAction(AppContextHelper.UserId, AppConstant.Issuer, AppConstant.Holder, "FT.IC.CI.I.H.IB.013", $"field algorithm parameters : {alg}", "200", null);
-
-                List<string> alglist = new List<string> { "EdDSA", "ES256", "ES256K", "RS256", "none" };
-                if (!alglist.Contains(alg))
-                {
-                    var error = new
-                    {
-                        credential = _credential,
-                        c_nonce = _nonce,
-                        statustext = "invalid encryption parameters, type alg mis value",
-                        status = "400",
-                    };
-                    //ActionLog.InsertLogAction(AppContextHelper.UserId, AppConstant.Issuer, AppConstant.Holder, "FT.IC.CI.I.H.IB.017", JsonSerializer.Serialize(error), "400", null);
-                    return BadRequest(error);
-                }
-                //ActionLog.InsertLogAction(AppContextHelper.UserId, AppConstant.Issuer, AppConstant.Holder, "FT.IC.CI.I.H.IB.017", $"algorithm type : {alg}", "200", null);
-
-                //check field typ
-                string typ = doc.RootElement.GetProperty("typ").GetString();
-                if (string.IsNullOrEmpty(typ))
-                {
-                    var error = new
-                    {
-                        credential = _credential,
-                        c_nonce = _nonce,
-                        statustext = "invalid encryption parameters typ",
-                        status = "400",
-                    };
-                    //ActionLog.InsertLogAction(AppContextHelper.UserId, AppConstant.Issuer, AppConstant.Holder, "FT.IC.CI.I.H.IB.014", JsonSerializer.Serialize(error), "400", null);
-                    return BadRequest(error);
-                }
-                //ActionLog.InsertLogAction(AppContextHelper.UserId, AppConstant.Issuer, AppConstant.Holder, "FT.IC.CI.I.H.IB.014", $"encryption parameters typ : {typ}", "200", null);
-
-                logger.Info($"typ => {typ}");
-                List<string> typlist = new List<string> { "JWT", "jwt", "openid4vci-proof+jwt" };
-                if (!typlist.Contains(typ))
-                {
-                    var error = new
-                    {
-                        credential = _credential,
-                        c_nonce = _nonce,
-                        statustext = "invalid encryption parameters typ, must be JWT",
-                        status = "400",
-                    };
-
-                    //ActionLog.InsertLogAction(AppContextHelper.UserId, AppConstant.Issuer, AppConstant.Holder, "FT.IC.CI.I.H.IB.018", JsonSerializer.Serialize(error), "400", null);
-                    return BadRequest(error);
-                }
-                //ActionLog.InsertLogAction(AppContextHelper.UserId, AppConstant.Issuer, AppConstant.Holder, "FT.IC.CI.I.H.IB.018", $"type data encryption : {typ}", "200", null);
-                logger.Info($"parts[1] => {parts[1]}");
-                string payloadJson = serv.Base64UrlDecodeToString(parts[1]);
-                using JsonDocument docPayload = JsonDocument.Parse(payloadJson);
-                string aud = docPayload.RootElement.GetProperty("aud").GetString();
-                logger.Info($"aud => {aud}");
-                //FT.IC.CI.I.H.IB.027
-                List<string> audlist = new List<string> { "none", "-" };
-                if (string.IsNullOrEmpty(aud))
-                {
-                    var error = new
-                    {
-                        credential = _credential,
-                        c_nonce = _nonce,
-                        statustext = "the aud parameters is not set",
-                        status = "400",
-                    };
-
-                    //ActionLog.InsertLogAction(AppContextHelper.UserId, AppConstant.Issuer, AppConstant.Holder, "FT.IC.CI.I.H.IB.027", JsonSerializer.Serialize(error), "400", null);
-                    return BadRequest(error);
-                }
-
-                if (audlist.Contains(aud))
-                {
-                    var error = new
-                    {
-                        credential = _credential,
-                        c_nonce = _nonce,
-                        statustext = "the aud parameters is not set",
-                        status = "400",
-                    };
-                    //ActionLog.InsertLogAction(AppContextHelper.UserId, AppConstant.Issuer, AppConstant.Holder, "FT.IC.CI.I.H.IB.027", JsonSerializer.Serialize(error), "400", null);
-                    return BadRequest(error);
-                }
-
-                bool isValidUrl = Uri.TryCreate(aud, UriKind.Absolute, out Uri uriResult)
-                          && (uriResult.Scheme == Uri.UriSchemeHttp || uriResult.Scheme == Uri.UriSchemeHttps);
-
-                if (!isValidUrl)
-                {
-                    var error = new
-                    {
-                        credential = _credential,
-                        c_nonce = _nonce,
-                        statustext = "the aud parameters is invalid",
-                        status = "400",
-                    };
-                    // ActionLog.InsertLogAction(AppContextHelper.UserId, AppConstant.Issuer, AppConstant.Holder, "FT.IC.CI.I.H.IB.027, FT.IC.CI.I.H.IB.029, FT.IC.CI.I.H.IB.031", JsonSerializer.Serialize(error), "400", null);
-                    return BadRequest(error);
-                }
-                //ActionLog.InsertLogAction(AppContextHelper.UserId, AppConstant.Issuer, AppConstant.Holder, "FT.IC.CI.I.H.IB.027, FT.IC.CI.I.H.IB.029, FT.IC.CI.I.H.IB.031", $"parameter aud : {aud}", "200", null);
-
-                //string iat = docPayload.RootElement.GetProperty("iat").GetString();
-                JsonElement root = docPayload.RootElement;
-                long striat = 0;
-                if (root.TryGetProperty("iat", out JsonElement iatElement) && iatElement.ValueKind != JsonValueKind.Null)// && iatElement.ValueKind != JsonValueKind.String)
-                {
-
-                    if (iatElement.ValueKind == JsonValueKind.String)
-                    {
-                        var t = iatElement.GetString();
-                        striat = Convert.ToInt64(t);
-                    }
-                    else
-                    {
-                        striat = iatElement.GetInt64();
-                    }
-
-                    //docPayload.RootElement.GetProperty("iat").GetInt64();
-                }
-
-                logger.Info($"striat => {striat.ToString()}");
-                string iat = striat == 0 ? null : striat.ToString();
-                List<string> iatlist = new List<string> { "none", "-" };
-                if (string.IsNullOrEmpty(iat))
-                {
-                    var error = new
-                    {
-                        credential = _credential,
-                        c_nonce = _nonce,
-                        statustext = "the iat parameters is not set",
-                        status = "400",
-                    };
-                    // ActionLog.InsertLogAction(AppContextHelper.UserId, AppConstant.Issuer, AppConstant.Holder, "FT.IC.CI.I.H.IB.028, FT.IC.CI.I.H.IB.030, FT.IC.CI.I.H.IB.032", "the iat parameters is not set", "400", null);
-                    return BadRequest(error);
-                }
-
-                if (audlist.Contains(iat))
-                {
-                    var error = new
-                    {
-                        credential = _credential,
-                        c_nonce = _nonce,
-                        statustext = "the aud parameters is not set",
-                        status = "400",
-                    };
-                    // ActionLog.InsertLogAction(AppContextHelper.UserId, AppConstant.Issuer, AppConstant.Holder, "FT.IC.CI.I.H.IB.028, FT.IC.CI.I.H.IB.030, FT.IC.CI.I.H.IB.032", "the iat parameters is not set", "400", null);
-                    return BadRequest(error);
-                }
-
-                try
-                {
-                    DateTimeOffset dateTimeOffset = DateTimeOffset.FromUnixTimeSeconds(long.Parse(iat));
-                    DateTime dateTime = dateTimeOffset.UtcDateTime;
-
-
-                    bool isValid_iat = serv.IsValidNumericDate(long.Parse(iat));
-                    if (!isValid_iat)
-                    {
-                        var error = new
-                        {
-                            credential = _credential,
-                            c_nonce = _nonce,
-                            statustext = "the iat parameters is invalid",
-                            status = "400",
-                        };
-                        //ActionLog.InsertLogAction(AppContextHelper.UserId, AppConstant.Issuer, AppConstant.Holder, "FT.IC.CI.I.H.IB.028, FT.IC.CI.I.H.IB.030, FT.IC.CI.I.H.IB.032", "the iat parameters is invalid", "400", null);
-                        return BadRequest(error);
-                    }
-                }
-                catch (Exception e)
-                {
-                    var error = new
-                    {
-                        credential = _credential,
-                        c_nonce = _nonce,
-                        statustext = "the iat parameters is invalid",
-                        status = "400",
-                    };
-                    // ActionLog.InsertLogAction(AppContextHelper.UserId, AppConstant.Issuer, AppConstant.Holder, "FT.IC.CI.I.H.IB.028, FT.IC.CI.I.H.IB.030, FT.IC.CI.I.H.IB.032", "the iat parameters is invalid", "400", null);
-                    return BadRequest(error);
-                }
-                //ActionLog.InsertLogAction(AppContextHelper.UserId, AppConstant.Issuer, AppConstant.Holder, "FT.IC.CI.I.H.IB.028, FT.IC.CI.I.H.IB.030, FT.IC.CI.I.H.IB.032", $"the iat parameters : {iat}", "200", null);
-
-                // Retrieve the did:key part
-                walletid = kid.Split('#')[0];
-
-                issuerid = serv._GetDID(_env);
-                string _docType = null;
-                // ✅ เพิ่ม dc+sd-jwt cases
-                // ── SD-JWT path (แยกออกมาก่อน switch เดิม) ──────────────────
-                logger.Info($"vcDocType => {vcDocType}");
-                if (vcDocType.EndsWith("dc+sd-jwt"))
-                {
-                    _credential = vcDocType switch
-                    {
-                        "TranscriptCredential_dc+sd-jwt" => serv.GenerateTranscriptSdJwt(issuerid, walletid, _env, urlBase),
-                        "BootCampCredential_dc+sd-jwt" => serv.GenerateBootCampSdJwt(issuerid, walletid, _env, urlBase),
-                        "IDCard_dc+sd-jwt" => serv.GenerateIDCardSdJwt(issuerid, walletid, _env, urlBase),
-                        "Iso18013DriversLicenseCredential_dc+sd-jwt" => serv.GenerateDriversLicenseSdJwt(issuerid, walletid, _env, urlBase),
-                        _ => throw new Exception($"Unsupported credential type: {vcDocType}")
-                    };
-                    _nonce = registerId;
-                    logger.Info($">>> SD-JWT: {_credential?.Substring(0, Math.Min(100, _credential?.Length ?? 0))}");
-                    logger.Info($">>> Contains ~: {_credential?.Contains('~')}");
-                    logger.Info($">>> Tilde count: {_credential?.Count(c => c == '~')}");
-
-                }
-                else
-                {
-                    var data = vcDocType switch
-                    {
-                        // jwt_vc_json เดิม — คงไว้
-                        "TranscriptCredential_jwt_vc_json" => serv.GenerateTranscriptVC(issuerid, walletid),
-                        "IDCardCredential_jwt_vc_json" => serv.GenerateIDCardVC(issuerid, walletid),
-
-
-                        _ => throw new Exception($"Unsupported credential type: {vcDocType}")
-                    };
-
-                    jResult = data;
-                    var options = new JsonSerializerOptions
-                    {
-                        WriteIndented = false,
-                        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
-                    };
-                    string json = JsonSerializer.Serialize(data.Value, options);
-
-
-                    PemReader pemReaderPrivate = new PemReader(new StringReader(serv.GetKey(true, _env)));
-                    Ed25519PrivateKeyParameters privateKeyEd25519 = (Ed25519PrivateKeyParameters)pemReaderPrivate.ReadObject();
-                    _credential = serv.GenerateJWTEd25519(json, issuerid, privateKeyEd25519);
-                    _nonce = registerId; //serv.GenStateId();
-                }
-
-                vcFormat = vcDocType.EndsWith("dc+sd-jwt") ? "dc+sd-jwt" : "jwt_vc_json";
-                logger.Info($"format => {vcFormat}");
-
-            }
-            catch (Exception e)
-            {
-                var error = new
-                {
-                    format = vcFormat,
-                    credential = _credential,//  _credential,
-                    c_nonce = _nonce,
-                    statustext = $"{e.Message}, {e.InnerException}",
-                    status = "400",
-                    msg = jResult
-                };
-
-                dbServ.SaveIssueVCLog(issuerid, walletid, _nonce, _credential, vcFormat, "failed");
-                return BadRequest(error);
-            }
-
-
-            var res = new
-            {
-                format = vcFormat,
-                credential = _credential,
-                c_nonce = _nonce,
-                c_nonce_expires = 86400,
-                notification_id = "",
-                status = "200",
-
-            };
-
-            logger.Info(JsonSerializer.Serialize(res));
-            Console.WriteLine("Success");
-            dbServ.SaveIssueVCLog(issuerid, walletid, _nonce, _credential, vcFormat, "success");
-            //ActionLog.InsertLogAction(AppContextHelper.UserId, AppConstant.Issuer, AppConstant.Holder, AppContextHelper.credentialOfferId, $"credential response => {_credential}", "200", AppContextHelper.credentialOfferId);
-            //ActionLog.InsertLogAction(AppContextHelper.UserId, AppConstant.Issuer, AppConstant.Holder, AppContextHelper.credentialOfferId, $"End Issue VC", "200", AppContextHelper.credentialOfferId);
-
-            //ActionLog.InsertLogAction(AppContextHelper.UserId, AppConstant.Holder, AppConstant.Issuer, "FT.IC.CI.H.I.VB.001, FT.IC.CI.H.I.VB.004", $"Credential response : {res}", "200", AppContextHelper.credentialOfferId);
-
-            //logs.Add(JsonSerializer.Serialize(new { message = res }, new JsonSerializerOptions { WriteIndented = true }));
-            return Ok(res);
-        }*/
+        // M-04: a full duplicate, pre-fix copy of this method used to be kept here as a commented-out
+        // block ("in case we need to revert"). Deleted — that's what version control (git history) is
+        // for, and keeping a second near-identical implementation around (even inert) made it easy to
+        // accidentally edit the wrong copy.
     }
 }

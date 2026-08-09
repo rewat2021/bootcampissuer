@@ -62,6 +62,10 @@ public class AccountController : Controller
         {
             new Claim(ClaimTypes.Name, dbUser.Username),
             new Claim(ClaimTypes.NameIdentifier, dbUser.Id.ToString()),
+            // C-03: dbusers is this issuer's staff/admin login (username+password), distinct from the
+            // ThaID citizen login used by wallet holders. Grant the admin role here so
+            // [Authorize(Roles="admin")] endpoints (CredentialConfigController) are reachable by staff.
+            new Claim(ClaimTypes.Role, "admin"),
         };
 
         var claimsIdentity = new ClaimsIdentity(claims, CookieAuthenticationDefaults.AuthenticationScheme);
@@ -96,7 +100,11 @@ public class AccountController : Controller
         {
             return Redirect(ReturnUrl);
         }
-        return RedirectToAction("QRCode", "QR");
+
+        // Staff/admin (username+password) login has no citizen-facing landing page of its own —
+        // admin work happens via the CredentialConfigController API, exercised through Swagger.
+        // Send them there instead of the citizen "request VC" QR page.
+        return Redirect("/swagger");
 
     }
 

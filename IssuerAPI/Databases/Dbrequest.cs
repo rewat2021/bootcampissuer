@@ -14,4 +14,6 @@ public partial class Dbrequest
     public DateTime? CreateDate { get; set; }
 
     public string? PreAuthorizedCode { get; set; }
+
+    public string? Subject { get; set; }
 }

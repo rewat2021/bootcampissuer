@@ -27,8 +27,10 @@ namespace IssuerAPI.Services
         private string ConfigFilePath() =>
             Path.Combine(_env.ContentRootPath, _options.CredentialConfigurationsFile);
 
-        // ── อ่าน claims ของ credential type ───────────────────────────────────
-        public JsonObject? GetClaims(string credentialType)
+        // H-06: claims now live under credential_metadata.claims as an OID4VCI 1.0 Final Appendix B.2
+        // array of { path: [...], mandatory, sd, display }. Normalize to fieldName -> claim-node so
+        // callers below don't need to know which shape (array vs legacy top-level object) was on disk.
+        public Dictionary<string, JsonNode?>? GetClaims(string credentialType)
         {
             try
             {
@@ -37,8 +39,29 @@ namespace IssuerAPI.Services
 
                 string json   = File.ReadAllText(path);
                 var    config = JsonNode.Parse(json)?.AsObject();
+                var    typeNode = config?[credentialType];
+                if (typeNode == null) return null;
 
-                return config?[credentialType]?["claims"]?.AsObject();
+                var claimsNode = typeNode["credential_metadata"]?["claims"] ?? typeNode["claims"];
+
+                var result = new Dictionary<string, JsonNode?>();
+
+                if (claimsNode is JsonArray claimsArray)
+                {
+                    foreach (var item in claimsArray)
+                    {
+                        string? fieldName = (item?["path"] as JsonArray)?.FirstOrDefault()?.GetValue<string>();
+                        if (!string.IsNullOrEmpty(fieldName))
+                            result[fieldName] = item;
+                    }
+                }
+                else if (claimsNode is JsonObject claimsObject)
+                {
+                    foreach (var (fieldName, claimNode) in claimsObject)
+                        result[fieldName] = claimNode;
+                }
+
+                return result;
             }
             catch (Exception ex)
             {

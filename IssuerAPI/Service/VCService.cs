@@ -485,8 +485,11 @@ namespace IssuerAPI.Service
                     ValidIssuer = _config["Jwt:Issuer"], // The expected issuer
                     ValidateAudience = true,
                     ValidAudience = $"{_config["Jwt:Issuer"]}/credential", //"everyone", // The expected audience
-                    ValidateLifetime = false, //default true
-                    ClockSkew = TimeSpan.Zero // To avoid time discrepancies
+                    // C-04: access tokens now carry a short (5 min, see TokenController) lifetime and
+                    // must actually be enforced — accepting expired tokens defeats the point of a
+                    // short-lived token entirely.
+                    ValidateLifetime = true,
+                    ClockSkew = TimeSpan.FromSeconds(30)
                 };
 
                 // Validate the token
@@ -499,6 +502,47 @@ namespace IssuerAPI.Service
             {
                 // Log or handle the exception as needed
                 return false;
+            }
+        }
+
+        // C-02: used by CredentialController to cross-check that the "sub" claim bound into the
+        // access token at /token time matches the registerId this /credential request is trying to
+        // issue against, so a token issued for one pre-authorized grant can't be replayed to pull a
+        // different holder's document type. Returns null if the token doesn't validate.
+        public string? ValidateTokenAndGetSubject(IConfiguration _config, string token)
+        {
+            try
+            {
+                string privateKeyBase64 = _config["Jwt:PrivateKey"];
+                if (string.IsNullOrEmpty(privateKeyBase64))
+                {
+                    return null;
+                }
+
+                byte[] privateKeyBytes = Convert.FromBase64String(privateKeyBase64);
+                var ecdsa = ECDsa.Create();
+                ecdsa.ImportECPrivateKey(privateKeyBytes, out _);
+                var ecdsaSecurityKey = new ECDsaSecurityKey(ecdsa);
+
+                var tokenHandler = new JwtSecurityTokenHandler();
+                var validationParameters = new TokenValidationParameters
+                {
+                    ValidateIssuerSigningKey = true,
+                    IssuerSigningKey = ecdsaSecurityKey,
+                    ValidateIssuer = true,
+                    ValidIssuer = _config["Jwt:Issuer"],
+                    ValidateAudience = true,
+                    ValidAudience = $"{_config["Jwt:Issuer"]}/credential",
+                    ValidateLifetime = true,
+                    ClockSkew = TimeSpan.FromSeconds(30)
+                };
+
+                var principal = tokenHandler.ValidateToken(token, validationParameters, out SecurityToken validatedToken);
+                return principal.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub)?.Value;
+            }
+            catch
+            {
+                return null;
             }
         }
 
@@ -665,14 +709,92 @@ namespace IssuerAPI.Service
             
         }
 
+        // Appendix F.1 / §13.8 of OID4VCI 1.0 Final: "iat" in a wallet proof JWT is used by the issuer to
+        // detect stale/replayed proofs. A window that tolerates up to 10 years in the future (the old
+        // behavior here) makes "iat" freshness checking meaningless. Use a tight window instead: a
+        // few minutes of clock skew tolerance in either direction.
+        private const int ProofIatClockSkewToleranceSeconds = 300;
+        private const int ProofIatMaxAgeSeconds = 300;
+
         public bool IsValidNumericDate(long numericDate)
         {
-            // Define reasonable bounds for Unix timestamps
-            long minValidTimestamp = 0; // January 1, 1970
-            long maxValidTimestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + (60 * 60 * 24 * 365 * 10); // 10 years in the future
+            long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            long earliestAllowed = now - ProofIatMaxAgeSeconds - ProofIatClockSkewToleranceSeconds;
+            long latestAllowed = now + ProofIatClockSkewToleranceSeconds;
 
-            // Check if the numericDate is within the valid range
-            return numericDate >= minValidTimestamp && numericDate <= maxValidTimestamp;
+            return numericDate >= earliestAllowed && numericDate <= latestAllowed;
+        }
+
+        // C-01: decode a did:key (multicodec 0xED 0x01 = Ed25519 public key, base58btc "z..."
+        // multibase-encoded) into the raw 32-byte Ed25519 public key so the wallet's proof JWT
+        // signature can actually be verified against it.
+        public byte[]? DecodeEd25519DidKey(string didKey)
+        {
+            if (string.IsNullOrWhiteSpace(didKey)) return null;
+
+            const string prefix = "did:key:";
+            if (!didKey.StartsWith(prefix, StringComparison.Ordinal)) return null;
+
+            string multibaseValue = didKey.Substring(prefix.Length);
+            if (multibaseValue.Length == 0 || multibaseValue[0] != 'z') return null; // 'z' = base58btc
+
+            byte[] decoded;
+            try
+            {
+                decoded = Base58.Bitcoin.Decode(multibaseValue.Substring(1)).ToArray();
+            }
+            catch
+            {
+                return null;
+            }
+
+            // multicodec varint prefix for Ed25519 public key is 0xED 0x01
+            if (decoded.Length != 34 || decoded[0] != 0xED || decoded[1] != 0x01)
+            {
+                return null;
+            }
+
+            byte[] rawKey = new byte[32];
+            Buffer.BlockCopy(decoded, 2, rawKey, 0, 32);
+            return rawKey;
+        }
+
+        // C-01: verify the Ed25519 signature over a compact JWS (header.payload.signature) against
+        // the given raw 32-byte public key. This is the check that was completely missing before —
+        // any syntactically well-formed proof JWT was accepted regardless of who (if anyone) signed it.
+        public bool VerifyEd25519Jws(string jws, byte[] rawPublicKey, out string errMsg)
+        {
+            errMsg = null;
+            try
+            {
+                if (rawPublicKey == null || rawPublicKey.Length != 32)
+                {
+                    errMsg = "invalid public key";
+                    return false;
+                }
+
+                string[] parts = jws.Split('.');
+                if (parts.Length != 3)
+                {
+                    errMsg = "malformed JWS";
+                    return false;
+                }
+
+                byte[] signature = WebEncoders.Base64UrlDecode(parts[2]);
+                byte[] signingInput = Encoding.ASCII.GetBytes($"{parts[0]}.{parts[1]}");
+
+                var algorithm = SignatureAlgorithm.Ed25519;
+                var publicKey = NSec.Cryptography.PublicKey.Import(algorithm, rawPublicKey, KeyBlobFormat.RawPublicKey);
+
+                bool ok = algorithm.Verify(publicKey, signingInput, signature);
+                if (!ok) errMsg = "signature verification failed";
+                return ok;
+            }
+            catch (Exception ex)
+            {
+                errMsg = ex.Message;
+                return false;
+            }
         }
 
 
@@ -707,37 +829,19 @@ namespace IssuerAPI.Service
             }
         }
 
-        public string IsExpectedDomain(HttpRequest request)
-        {
-            string domain = request.Host.Host; //Request.Host.Host;
-            string filejson = null;
-            filejson = "openid-credential-issuer.json";
-            if (domain == "vc-testtool-test.etda.or.th")
-            {
-                filejson = "openid-credential-issuer-test.json";
-            }
-            else
-            {
-                filejson = "openid-credential-issuer.json";
-            }
+        // M-04: IsExpectedDomain() and the static openid-credential-issuer*.json files it pointed at
+        // were dead code — no route ever called this method. The live, single source of truth for
+        // issuer metadata is App_Data/credential-configurations-supported.json, served dynamically by
+        // IssuerController.ReadJsonAsync(). Removed to avoid anyone mistaking the static files for a
+        // real, maintained metadata path.
 
-            return filejson;
-        }
-
-        public string getProofByNonce(string proof)
-        {
-            DBService vCServ = new DBService();
-            string jwt = proof;
-            string[] parts = jwt.Split('.');
-
-            // Decode the header and payload
-            string payload = Base64UrlDecodeToString(parts[1]);
-            using JsonDocument doc = JsonDocument.Parse(payload);
-            string nonce = doc.RootElement.GetProperty("nonce").GetString();
-            string id = vCServ.GetRegisterId(nonce);
-
-            return id;
-        }
+        // C-02 / C-04 / H-01: this used to resolve the credential grant by reading the "nonce" claim
+        // out of an *unverified* proof and looking it up directly as a RegisterId — i.e. the
+        // unauthenticated proof picked which grant to use, with the access token only checked
+        // against that result afterward. CredentialController now resolves the grant from the
+        // verified access token's "sub" claim instead (ValidateTokenAndGetSubject), and validates the
+        // proof's "nonce" claim separately as a single-use server-issued nonce (DBService.
+        // TryConsumeNonce) — freshness/replay checking, not grant lookup. Removed.
 
 
         public JsonResult GenerateTranscriptVC(string issuerid, string walletid) 
@@ -1674,7 +1778,13 @@ namespace IssuerAPI.Service
             string configJson = File.ReadAllText(configPath);
 
             var configNode = System.Text.Json.Nodes.JsonNode.Parse(configJson)?.AsObject();
-            var claimsNode = configNode?[CREDENTIAL_TYPE]?["claims"];
+
+            // H-06: OID4VCI 1.0 Final Appendix B.2 — the "claims" array lives under
+            // credential_metadata.claims, each entry being { "path": [...], "mandatory": bool }
+            // (plus this app's own non-standard "sd" extension key). Prefer that location; fall back
+            // to a top-level "claims" for older/hand-edited config entries.
+            var claimsNode = configNode?[CREDENTIAL_TYPE]?["credential_metadata"]?["claims"]
+                           ?? configNode?[CREDENTIAL_TYPE]?["claims"];
 
 
             // ── 3. อ่าน claims จาก array format (OID4VCI 1.0) ─────────
@@ -1999,8 +2109,11 @@ namespace IssuerAPI.Service
             CBORObject msoTagged = CBORObject.FromObjectAndTag(msoBytes, 24);
 
             // ── 6. เซ็น MSO ด้วย COSE_Sign1 (ES256) — ใช้ built-in .NET System.Security.Cryptography.Cose ──
+            // Bug fix: -8 is COSE alg EdDSA, not ES256 — was mismatched against issuerKey, which is an
+            // ECDSA P-256 key (LoadEcdsaKey above). ISO 18013-5 Table B.1 requires ES256/ES384/ES512
+            // for IssuerAuth; the correct COSE algorithm identifier for ES256 is -7.
             var protectedHeaders = new CoseHeaderMap();
-            protectedHeaders.Add(CoseHeaderLabel.Algorithm, -8); // -7, ES256
+            protectedHeaders.Add(CoseHeaderLabel.Algorithm, -7); // ES256
 
             byte[] issuerAuth = CoseSign1Message.SignEmbedded(
                 embeddedContent: msoTagged.EncodeToBytes(),

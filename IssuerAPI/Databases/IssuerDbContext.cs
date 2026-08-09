@@ -16,7 +16,11 @@ public partial class IssuerDbContext : DbContext
     {
     }
 
+    public virtual DbSet<Dbissuedcredential> Dbissuedcredentials { get; set; }
+
     public virtual DbSet<Dbissuerlog> Dbissuerlogs { get; set; }
+
+    public virtual DbSet<Dbnonce> Dbnonces { get; set; }
 
     public virtual DbSet<Dbregister> Dbregisters { get; set; }
 
@@ -26,8 +30,16 @@ public partial class IssuerDbContext : DbContext
 
     protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
     {
-        var connStr = Environment.GetEnvironmentVariable("CONNECTION_STRING")
-            ?? "server=192.100.10.46;port=3306;database=issuer;user=root;password=P@ssw0rd@1234;sslmode=None";
+        // C-06: no hardcoded DB credential fallback. Must be supplied via CONNECTION_STRING env var.
+        // Re-running `dotnet ef dbcontext scaffold` (e.g. to pick up a new column/table) WILL
+        // overwrite this method with a literal connection string + password again — re-apply this
+        // block afterward every time, or scaffold with `--no-onconfiguring` so it's left alone.
+        var connStr = Environment.GetEnvironmentVariable("CONNECTION_STRING");
+        if (string.IsNullOrWhiteSpace(connStr))
+        {
+            throw new InvalidOperationException(
+                "CONNECTION_STRING environment variable is not set. Refusing to start with a hardcoded database credential.");
+        }
         optionsBuilder.UseMySql(connStr, Microsoft.EntityFrameworkCore.ServerVersion.Parse("8.0.45-mysql"));
     }
 
@@ -36,6 +48,27 @@ public partial class IssuerDbContext : DbContext
         modelBuilder
             .UseCollation("utf8mb4_0900_ai_ci")
             .HasCharSet("utf8mb4");
+
+        modelBuilder.Entity<Dbissuedcredential>(entity =>
+        {
+            entity.HasKey(e => e.Id).HasName("PRIMARY");
+
+            entity.ToTable("dbissuedcredential");
+
+            entity.HasIndex(e => new { e.RegisterId, e.CredentialConfigurationId }, "uq_grant_config").IsUnique();
+
+            entity.Property(e => e.Id).HasColumnName("id");
+            entity.Property(e => e.CredentialConfigurationId)
+                .HasMaxLength(200)
+                .HasColumnName("credential_configuration_id");
+            entity.Property(e => e.IssuedAt)
+                .HasDefaultValueSql("CURRENT_TIMESTAMP")
+                .HasColumnType("datetime")
+                .HasColumnName("issued_at");
+            entity.Property(e => e.RegisterId)
+                .HasMaxLength(50)
+                .HasColumnName("register_id");
+        });
 
         modelBuilder.Entity<Dbissuerlog>(entity =>
         {
@@ -81,6 +114,28 @@ public partial class IssuerDbContext : DbContext
                 .HasColumnName("team_id");
         });
 
+        modelBuilder.Entity<Dbnonce>(entity =>
+        {
+            entity.HasKey(e => e.Id).HasName("PRIMARY");
+
+            entity.ToTable("dbnonce");
+
+            entity.HasIndex(e => e.Nonce, "uq_nonce").IsUnique();
+
+            entity.Property(e => e.Id).HasColumnName("id");
+            entity.Property(e => e.CreatedAt)
+                .HasDefaultValueSql("CURRENT_TIMESTAMP")
+                .HasColumnType("datetime")
+                .HasColumnName("created_at");
+            entity.Property(e => e.ExpiresAt)
+                .HasColumnType("datetime")
+                .HasColumnName("expires_at");
+            entity.Property(e => e.Nonce)
+                .HasMaxLength(100)
+                .HasColumnName("nonce");
+            entity.Property(e => e.Used).HasColumnName("used");
+        });
+
         modelBuilder.Entity<Dbregister>(entity =>
         {
             entity.HasKey(e => e.Id).HasName("PRIMARY");
@@ -112,6 +167,9 @@ public partial class IssuerDbContext : DbContext
                 .HasMaxLength(50)
                 .IsFixedLength()
                 .HasColumnName("RegisterID");
+            entity.Property(e => e.Subject)
+                .HasMaxLength(255)
+                .HasColumnName("subject");
         });
 
         modelBuilder.Entity<Dbuser>(entity =>
