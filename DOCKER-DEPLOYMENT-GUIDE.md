@@ -15,7 +15,8 @@
 | `CONNECTION_STRING` | connection string MySQL จริงที่จะใช้ (ชี้ไป `issuer-mysql` service ถ้าใช้ DB ที่ compose สร้างให้ หรือชี้ไปเซิร์ฟเวอร์จริงถ้าใช้ DB แยก) |
 | `MYSQL_ROOT_PASSWORD` | ตั้งเอง — ใช้ตอน `issuer-mysql` container สร้าง root user ครั้งแรก |
 | `Jwt__PrivateKey` | generate เองด้วยคำสั่ง PowerShell ด้านล่าง (ข้อ 2) |
-| `ThaIDConfig__ClientID` / `ThaIDConfig__ClientSecret` | ขอใหม่จาก DOPA/Chula (ค่าเก่าหลุดไปแล้ว) |
+| `ThaIDConfig__ClientID`  | ThaiD Client ID |
+| `ThaIDConfig__ClientSecret` | ThaiD Client Secret |
 | `ADMIN_BOOTSTRAP_USERNAME` / `ADMIN_BOOTSTRAP_PASSWORD` | ตั้งเอง — ใช้สร้างบัญชี staff/admin แรกอัตโนมัติตอน container boot ครั้งแรก (ดูข้อ 6) |
 | `ASPNETCORE_ENVIRONMENT` | `Production` (ตั้งไว้แล้ว) |
 
