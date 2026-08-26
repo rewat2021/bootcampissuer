@@ -1,29 +1,10 @@
 version: '3.8'
 
 services:
-  issuer-mysql:
-    image: mysql:8.0
-    container_name: issuer-mysql
-    environment:
-      # C-06: no default — a hardcoded real-looking password here was committed to source before.
-      # Set MYSQL_ROOT_PASSWORD in your .env file (gitignored); compose fails fast if it's unset.
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD in .env}
-      MYSQL_DATABASE: issuer
-    volumes:
-      - issuer-mysql-data:/var/lib/mysql
-      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
-    ports:
-      - "3306:3306"
-    healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-p${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD in .env}"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 30s
-    restart: unless-stopped
-    networks:
-      - lab-network
-
+  # issuer-mysql (dockerized DB) removed — this deployment connects to an existing external MySQL
+  # server via CONNECTION_STRING in .env instead of a compose-managed database. If you ever need a
+  # self-contained local DB again, restore the issuer-mysql service block (see git history) along
+  # with this service's `depends_on`.
   issuer-api:
     image: issuer-api:latest
     container_name: issuer-api
@@ -31,15 +12,9 @@ services:
       - "5002:8080"
     env_file:
       - .env
-    depends_on:
-      issuer-mysql:
-        condition: service_healthy
     restart: unless-stopped
     networks:
       - lab-network
-
-volumes:
-  issuer-mysql-data:
 
 networks:
   lab-network:
