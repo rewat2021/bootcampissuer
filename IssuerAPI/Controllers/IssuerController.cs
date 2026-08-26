@@ -107,6 +107,37 @@ namespace IssuerAPI.Controllers
             return new JsonResult(response);
         }
 
+        // did:web identity for this issuer — same Ed25519 key as did:key (_GetDID), served as a DID
+        // Document at the standard did:web resolution location. Additive, not a replacement: existing
+        // did:key-based flows (proof kid, credential iss, mdoc IssuerAuth) are untouched.
+        [AllowAnonymous]
+        [HttpGet("/.well-known/did.json")]
+        public IActionResult DidWebDocument()
+        {
+            var baseUrl = GetBaseUrl(HttpContext, _options);
+            VCService vcServ = new VCService();
+            var doc = vcServ.BuildDidWebDocument(_env, baseUrl);
+            return new JsonResult(doc);
+        }
+
+        // IETF Token Status List — served for the credentials that embed a "status" claim (see
+        // VCService.BuildStatusClaim, wired into the dc+sd-jwt generators). Must be anonymous: any
+        // verifier checking whether a presented credential is revoked needs to fetch this, not just
+        // this issuer's own logged-in users. Not cached at the response level — VCService already
+        // sets a 24h "exp" on the token itself, which is what a well-behaved verifier should honor.
+        [AllowAnonymous]
+        [HttpGet("/status-list/1")]
+        public IActionResult StatusList1()
+        {
+            var baseUrl = GetBaseUrl(HttpContext, _options);
+            VCService vcServ = new VCService();
+            // กลับมาใช้ did:key (_GetDID) — ให้ตรงกับ iss ของ VC ที่ CredentialController ออกไปแล้ว
+            // (สลับกลับตามที่ CredentialController สลับกลับ ไม่งั้น status list กับ VC จะอ้าง issuer คนละ DID กัน)
+            string issuerid = vcServ._GetDID(_env);
+            string token = vcServ.BuildStatusListToken(issuerid, _env, baseUrl);
+            return Content(token, "application/statuslist+jwt");
+        }
+
         // H-01: OID4VCI 1.0 Final §7 — Nonce Endpoint. Issues a fresh c_nonce a wallet embeds in its
         // proof JWT "nonce" claim. The nonce is now persisted (DBService.IssueNonce) and checked for
         // single use at /credential (DBService.TryConsumeNonce) — previously this endpoint generated

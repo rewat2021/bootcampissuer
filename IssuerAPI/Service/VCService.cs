@@ -20,6 +20,7 @@ using System.Text.RegularExpressions;
 using PeterO.Cbor;
 using System.Security.Cryptography.Cose;
 using System.Security.Cryptography;
+using System.Numerics;
 
 
 namespace IssuerAPI.Service
@@ -452,6 +453,62 @@ namespace IssuerAPI.Service
             return diddoc;
         }
 
+        // did:web counterpart to _GetDID (did:key), same Ed25519 key material — different identifier
+        // scheme, not a replacement. did:web binds the DID to this issuer's actual HTTPS domain
+        // (resolved by fetching /.well-known/did.json over TLS) instead of being a bare
+        // self-certifying identifier, which some institutional verifiers expect/prefer for issuer
+        // trust. Existing did:key-based issuance, proof verification, and mdoc IssuerAuth are
+        // unaffected — this is purely an additional, alternate identity for the same key.
+        //
+        // did:web has no path segments here (baseUrl is scheme+host[:port] only, no sub-path), so the
+        // DID document is served at the plain /.well-known/did.json location per the did:web spec.
+        public string GetDidWebId(string baseUrl)
+        {
+            var uri = new Uri(baseUrl);
+            string hostPart = uri.IsDefaultPort ? uri.Host : $"{uri.Host}%3A{uri.Port}";
+            return $"did:web:{hostPart}";
+        }
+
+        public JsonObject BuildDidWebDocument(IWebHostEnvironment _env, string baseUrl)
+        {
+            string didWeb = GetDidWebId(baseUrl);
+
+            PemReader pemReaderPublic = new PemReader(new StringReader(GetKey(false, _env)));
+            Ed25519PublicKeyParameters publicKeyEd25519 = (Ed25519PublicKeyParameters)pemReaderPublic.ReadObject();
+            byte[] publicKeyBytes = publicKeyEd25519.GetEncoded();
+
+            // Same multicodec (0xED 0x01 = Ed25519 public key) + base58btc multibase encoding used by
+            // did:key above — this yields the identical "z6Mk..." string, just carried as
+            // publicKeyMultibase here instead of embedded in the DID itself.
+            byte[] multicodecPrefix = new byte[] { 0xED, 0x01 };
+            byte[] prefixed = new byte[multicodecPrefix.Length + publicKeyBytes.Length];
+            Buffer.BlockCopy(multicodecPrefix, 0, prefixed, 0, multicodecPrefix.Length);
+            Buffer.BlockCopy(publicKeyBytes, 0, prefixed, multicodecPrefix.Length, publicKeyBytes.Length);
+            string publicKeyMultibase = "z" + Base58.Bitcoin.Encode(prefixed);
+
+            string keyId = $"{didWeb}#key-1";
+
+            var verificationMethod = new JsonObject
+            {
+                ["id"] = keyId,
+                ["type"] = "Ed25519VerificationKey2020",
+                ["controller"] = didWeb,
+                ["publicKeyMultibase"] = publicKeyMultibase
+            };
+
+            return new JsonObject
+            {
+                ["@context"] = new JsonArray(
+                    "https://www.w3.org/ns/did/v1",
+                    "https://w3id.org/security/suites/ed25519-2020/v1"
+                ),
+                ["id"] = didWeb,
+                ["verificationMethod"] = new JsonArray(verificationMethod),
+                ["authentication"] = new JsonArray(keyId),
+                ["assertionMethod"] = new JsonArray(keyId)
+            };
+        }
+
 
         public bool IsTokenValid(IConfiguration _config, string token)
         {
@@ -516,6 +573,7 @@ namespace IssuerAPI.Service
                 string privateKeyBase64 = _config["Jwt:PrivateKey"];
                 if (string.IsNullOrEmpty(privateKeyBase64))
                 {
+                    NLog.LogManager.GetCurrentClassLogger().Warn("ValidateTokenAndGetSubject: Jwt:PrivateKey is not configured");
                     return null;
                 }
 
@@ -525,6 +583,13 @@ namespace IssuerAPI.Service
                 var ecdsaSecurityKey = new ECDsaSecurityKey(ecdsa);
 
                 var tokenHandler = new JwtSecurityTokenHandler();
+                // JwtSecurityTokenHandler remaps short inbound claim types to long claim URIs by
+                // default (e.g. "sub" -> ClaimTypes.NameIdentifier) unless told not to. That silent
+                // rename is why FindFirst(JwtRegisteredClaimNames.Sub) below could return null even for
+                // a token that validated successfully (no exception thrown, nothing to log) — the "sub"
+                // claim is still there, just renamed. Keep the raw JWT claim names as-is.
+                tokenHandler.MapInboundClaims = false;
+
                 var validationParameters = new TokenValidationParameters
                 {
                     ValidateIssuerSigningKey = true,
@@ -538,10 +603,25 @@ namespace IssuerAPI.Service
                 };
 
                 var principal = tokenHandler.ValidateToken(token, validationParameters, out SecurityToken validatedToken);
-                return principal.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub)?.Value;
+                string sub = principal.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub)?.Value;
+                if (sub == null)
+                {
+                    // Token validated fine (signature/issuer/audience/lifetime all passed — no
+                    // exception) but has no "sub" claim under that exact name. Dump every claim type
+                    // actually present so the mismatch is visible instead of guessing again.
+                    string claimDump = string.Join(", ", principal.Claims.Select(c => $"{c.Type}={c.Value}"));
+                    NLog.LogManager.GetCurrentClassLogger().Warn(
+                        $"ValidateTokenAndGetSubject: token validated but no 'sub' claim found. Claims present: [{claimDump}]");
+                }
+                return sub;
             }
-            catch
+            catch (Exception ex)
             {
+                // The client only ever sees the generic "Token is invalid or expired" (H-04 — no
+                // internals leaked), but that made this completely unobservable server-side too.
+                // Log the real reason (expired vs bad signature vs iss/aud mismatch vs malformed) so
+                // it's actually diagnosable from server logs instead of guessing.
+                NLog.LogManager.GetCurrentClassLogger().Warn(ex, "ValidateTokenAndGetSubject: token rejected");
                 return null;
             }
         }
@@ -797,6 +877,287 @@ namespace IssuerAPI.Service
             }
         }
 
+        // NIST P-256 (secp256r1) curve parameters, used only to decompress a did:key-encoded P-256
+        // point (see DecodeP256DidKey below). y^2 = x^3 - 3x + b (mod p).
+        private static readonly BigInteger P256_P = new BigInteger(
+            Convert.FromHexString("FFFFFFFF00000001000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFF"),
+            isUnsigned: true, isBigEndian: true);
+        private static readonly BigInteger P256_B = new BigInteger(
+            Convert.FromHexString("5AC635D8AA3A93E7B3EBBD55769886BC651D06B0CC53B0F63BCE3C3E27D2604B"),
+            isUnsigned: true, isBigEndian: true);
+
+        private static byte[] ToFixedBigEndian(BigInteger value, int length)
+        {
+            byte[] raw = value.ToByteArray(isUnsigned: true, isBigEndian: true);
+            if (raw.Length == length) return raw;
+            if (raw.Length > length) return raw[(raw.Length - length)..];
+            byte[] padded = new byte[length];
+            Array.Copy(raw, 0, padded, length - raw.Length, raw.Length);
+            return padded;
+        }
+
+        // Decompresses a SEC1-compressed P-256 point (0x02/0x03 || 32-byte x) into an uncompressed
+        // point (0x04 || 32-byte x || 32-byte y). did:key encodes P-256 keys in compressed form, but
+        // .NET's ECParameters/ECPoint API only accepts explicit X/Y — there's no built-in decompress.
+        // Internal (not private): VerifierService reuses this for did:web P-256 keys too, since
+        // did:web's publicKeyMultibase uses the exact same compressed-point encoding as did:key.
+        internal static byte[]? DecompressP256Point(byte[] compressed)
+        {
+            if (compressed == null || compressed.Length != 33 || (compressed[0] != 0x02 && compressed[0] != 0x03))
+                return null;
+
+            try
+            {
+                var x = new BigInteger(compressed[1..], isUnsigned: true, isBigEndian: true);
+
+                // y^2 = x^3 - 3x + b (mod p)
+                var rhs = ((BigInteger.ModPow(x, 3, P256_P) - 3 * x + P256_B) % P256_P + P256_P) % P256_P;
+
+                // P-256's prime p ≡ 3 (mod 4), so a square root (if one exists) is rhs^((p+1)/4) mod p.
+                var y = BigInteger.ModPow(rhs, (P256_P + 1) / 4, P256_P);
+
+                // Verify rhs actually was a quadratic residue (x was really on the curve), not just
+                // blindly trust the computed root.
+                if (BigInteger.ModPow(y, 2, P256_P) != rhs) return null;
+
+                bool computedYIsOdd = !y.IsEven;
+                bool wantOddY = compressed[0] == 0x03;
+                if (computedYIsOdd != wantOddY)
+                {
+                    y = P256_P - y;
+                }
+
+                byte[] result = new byte[65];
+                result[0] = 0x04;
+                Array.Copy(compressed, 1, result, 1, 32);
+                Array.Copy(ToFixedBigEndian(y, 32), 0, result, 33, 32);
+                return result;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        // ES256 counterpart to DecodeEd25519DidKey. did:key P-256 keys use multicodec 0x1200
+        // (varint-encoded as 0x80 0x24) over a 33-byte SEC1-compressed public key point, versus
+        // Ed25519's 0xED 0x01 over a raw 32-byte key. Returns a 65-byte uncompressed point
+        // (0x04 || X || Y) suitable for ECParameters.Q, or null if the kid isn't a valid P-256 did:key.
+        public byte[]? DecodeP256DidKey(string didKey)
+        {
+            if (string.IsNullOrWhiteSpace(didKey)) return null;
+
+            const string prefix = "did:key:";
+            if (!didKey.StartsWith(prefix, StringComparison.Ordinal)) return null;
+
+            string multibaseValue = didKey.Substring(prefix.Length);
+            if (multibaseValue.Length == 0 || multibaseValue[0] != 'z') return null; // 'z' = base58btc
+
+            byte[] decoded;
+            try
+            {
+                decoded = Base58.Bitcoin.Decode(multibaseValue.Substring(1)).ToArray();
+            }
+            catch
+            {
+                return null;
+            }
+
+            // multicodec varint prefix for a P-256 (compressed) public key is 0x80 0x24 (= 0x1200)
+            if (decoded.Length != 35 || decoded[0] != 0x80 || decoded[1] != 0x24)
+            {
+                return null;
+            }
+
+            byte[] compressed = new byte[33];
+            Buffer.BlockCopy(decoded, 2, compressed, 0, 33);
+            return DecompressP256Point(compressed);
+        }
+
+        // ES256 counterpart to VerifyEd25519Jws. rawPublicKey must be a 65-byte uncompressed P-256
+        // point (0x04 || X || Y) as returned by DecodeP256DidKey. JWS ES256 signatures are the raw
+        // IEEE P1363 concatenation (R || S, 32 bytes each) — NOT ASN.1 DER — per RFC 7518 §3.4.
+        public bool VerifyES256Jws(string jws, byte[] rawPublicKey, out string errMsg)
+        {
+            errMsg = null;
+            try
+            {
+                if (rawPublicKey == null || rawPublicKey.Length != 65 || rawPublicKey[0] != 0x04)
+                {
+                    errMsg = "invalid public key";
+                    return false;
+                }
+
+                string[] parts = jws.Split('.');
+                if (parts.Length != 3)
+                {
+                    errMsg = "malformed JWS";
+                    return false;
+                }
+
+                byte[] signature = WebEncoders.Base64UrlDecode(parts[2]);
+                if (signature.Length != 64)
+                {
+                    errMsg = "invalid signature length (expected 64-byte IEEE P1363 R||S)";
+                    return false;
+                }
+
+                byte[] signingInput = Encoding.ASCII.GetBytes($"{parts[0]}.{parts[1]}");
+
+                var ecParams = new ECParameters
+                {
+                    Curve = ECCurve.NamedCurves.nistP256,
+                    Q = new ECPoint
+                    {
+                        X = rawPublicKey[1..33],
+                        Y = rawPublicKey[33..65]
+                    }
+                };
+
+                using var ecdsa = ECDsa.Create(ecParams);
+                bool ok = ecdsa.VerifyData(signingInput, signature, HashAlgorithmName.SHA256, DSASignatureFormat.IeeeP1363FixedFieldConcatenation);
+                if (!ok) errMsg = "signature verification failed";
+                return ok;
+            }
+            catch (Exception ex)
+            {
+                errMsg = ex.Message;
+                return false;
+            }
+        }
+
+        // Builds the "cnf" (confirmation) claim embedded in issued credentials for holder binding.
+        // Previously this was always `{ kid = walletid }` — a reference to the wallet's did:key that
+        // requires the verifier to resolve did:key itself. Some verifiers instead expect the public
+        // key material embedded directly (RFC 7800 "jwk" member) rather than doing that resolution.
+        // Both forms describe the exact same, already-proof-verified key (see C-01 in
+        // CredentialController — walletid only ever reaches here after its proof JWT signature was
+        // verified against it), so embedding both is strictly more compatible, not a weaker claim.
+        // Dispatches on whether walletid decodes as an Ed25519 or P-256 did:key (this issuer only
+        // ever hands out did:key holder identifiers of one of those two types — see the proof alg
+        // check in CredentialController).
+        public object BuildCnf(string didKey)
+        {
+            byte[] ed25519Key = DecodeEd25519DidKey(didKey);
+            if (ed25519Key != null)
+            {
+                return new
+                {
+                    kid = didKey,
+                    jwk = new
+                    {
+                        kty = "OKP",
+                        crv = "Ed25519",
+                        x = WebEncoders.Base64UrlEncode(ed25519Key)
+                    }
+                };
+            }
+
+            byte[] p256Key = DecodeP256DidKey(didKey); // 65-byte uncompressed: 0x04 || X(32) || Y(32)
+            if (p256Key != null)
+            {
+                return new
+                {
+                    kid = didKey,
+                    jwk = new
+                    {
+                        kty = "EC",
+                        crv = "P-256",
+                        x = WebEncoders.Base64UrlEncode(p256Key[1..33]),
+                        y = WebEncoders.Base64UrlEncode(p256Key[33..65])
+                    }
+                };
+            }
+
+            // Shouldn't happen in practice — CredentialController already validated didKey decodes
+            // successfully before any credential generator is ever called. Fall back to a reference
+            // only rather than throwing mid-issuance.
+            return new { kid = didKey };
+        }
+
+        // Credential status per IETF "Token Status List" (referenced by SD-JWT VC for revocation).
+        // statusListIndex is the dbissuedcredential row's own Id — assigned by TryMarkIssued at the
+        // moment this specific credential instance was recorded as issued, so it's stable and unique
+        // per issued credential without a separate counter/table.
+        public object BuildStatusClaim(int statusListIndex, string baseUrl)
+        {
+            return new
+            {
+                status_list = new
+                {
+                    idx = statusListIndex,
+                    uri = $"{baseUrl}/status-list/1"
+                }
+            };
+        }
+
+        // Builds and signs the Status List Token that /status-list/1 serves. One bit per issued
+        // credential (bits=1: 0=valid, 1=revoked), indexed by dbissuedcredential.Id, packed
+        // MSB-first per byte, DEFLATE-compressed (raw deflate, no zlib/gzip header — that's what the
+        // spec's "lst" expects), base64url-encoded. Signed the same way every other Ed25519 JWT in
+        // this issuer is (see GenerateJWTEd25519) — a verifier resolves the signing key the same way
+        // it already does for credentials (this issuer's did:key/did:web).
+        public string BuildStatusListToken(string issuerid, IWebHostEnvironment _env, string baseUrl)
+        {
+            var entries = new DBService().GetStatusListEntries();
+            int maxId = entries.Count == 0 ? 0 : entries.Max(e => e.Id);
+
+            // 1 bit per index, index 0 is a throwaway (dbissuedcredential.Id starts at 1) — simpler
+            // than remapping indices, costs one wasted bit.
+            var bits = new System.Collections.BitArray(maxId + 1);
+            foreach (var (id, revoked) in entries)
+            {
+                bits[id] = revoked;
+            }
+
+            byte[] packed = new byte[(bits.Length + 7) / 8];
+            for (int i = 0; i < bits.Length; i++)
+            {
+                if (bits[i])
+                {
+                    packed[i / 8] |= (byte)(1 << (7 - (i % 8))); // MSB-first within each byte
+                }
+            }
+
+            using var compressedStream = new MemoryStream();
+            using (var deflate = new System.IO.Compression.DeflateStream(compressedStream, System.IO.Compression.CompressionLevel.Optimal, leaveOpen: true))
+            {
+                deflate.Write(packed, 0, packed.Length);
+            }
+            string lst = WebEncoders.Base64UrlEncode(compressedStream.ToArray());
+
+            DateTime now = DateTime.UtcNow;
+            var payload = new
+            {
+                iss = issuerid,
+                sub = $"{baseUrl}/status-list/1",
+                iat = ((DateTimeOffset)now).ToUnixTimeSeconds(),
+                exp = ((DateTimeOffset)now.AddDays(1)).ToUnixTimeSeconds(), // short-lived — verifiers re-fetch, not cache indefinitely
+                status_list = new
+                {
+                    bits = 1,
+                    lst = lst
+                }
+            };
+
+            string header = $"{{\"alg\":\"EdDSA\",\"typ\":\"statuslist+jwt\",\"kid\":\"{issuerid}\"}}";
+            var options = new JsonSerializerOptions { WriteIndented = false };
+            string payloadJson = JsonSerializer.Serialize(payload, options);
+
+            string headerB64 = WebEncoders.Base64UrlEncode(Encoding.UTF8.GetBytes(header));
+            string payloadB64 = WebEncoders.Base64UrlEncode(Encoding.UTF8.GetBytes(payloadJson));
+            string signingInput = $"{headerB64}.{payloadB64}";
+
+            PemReader pemReaderPrivate = new PemReader(new StringReader(GetKey(true, _env)));
+            Ed25519PrivateKeyParameters privateKey = (Ed25519PrivateKeyParameters)pemReaderPrivate.ReadObject();
+            var signer = new Ed25519Signer();
+            signer.Init(true, privateKey);
+            byte[] signingBytes = Encoding.UTF8.GetBytes(signingInput);
+            signer.BlockUpdate(signingBytes, 0, signingBytes.Length);
+            string encodedSignature = WebEncoders.Base64UrlEncode(signer.GenerateSignature());
+
+            return $"{headerB64}.{payloadB64}.{encodedSignature}";
+        }
 
         public async Task<(bool isValid, string presentation_definition)> CheckPresentationDefinition(string presentation_definition_uri)
         {
@@ -936,7 +1297,7 @@ namespace IssuerAPI.Service
                 res.Type = "PostalAddress";
                 res.addressCountry = "TH";
                 item.ResidentCountryOrTerritory = res;
-                item.Image = "/examples/jvanzweden_s.jpg";
+                item.Image = "data:image/jpeg;base64,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"; //"/examples/jvanzweden_s.jpg";
                 item.FacultyName = "คณะวิศวกรรมศาสตร์";
 
                 ProgramContext program = new ProgramContext();
@@ -1104,23 +1465,32 @@ namespace IssuerAPI.Service
 
                 var subject = model.credentialSubject;   // แก้ไขตัวที่ constructor สร้างไว้แล้ว แทนสร้างใหม่
                 subject.id = walletid;
-                subject.FamilyName = "สมชาย";
-                subject.GivenName = "สมศักดิ์";
-                subject.BirthDate = "1985-01-01";
+                subject.FamilyName = "เอกสารดิจิตัล";
+                subject.GivenName = "นางสาวทดสอบ";
+                subject.GivenNameEng = "Testing";
+                subject.FamilyNameEng = "DocumentDigital";
+                subject.BirthDate = "1987-06-10";
                 subject.IssueDate = "2023-01-01";
                 subject.ExpiryDate = "2033-01-01";
                 subject.IssuingCountry = "TH";
                 subject.IssuingAuthority = "กรมการขนส่งทางบก";
                 subject.DocumentNumber = "123456789";
-                subject.Portrait = "base64_encoded_image_string";
+                // Mock/test data — no real portrait image available here. Previously this was the
+                // literal placeholder text "base64_encoded_image_string", which is not valid base64
+                // (contains '_' among other issues). GenerateDriverLicenseMdoc calls
+                // Convert.FromBase64String on this value, so the placeholder crashed every mDL
+                // request with "The input is not a valid Base-64 string...". Leaving it empty is safe
+                // for both paths: GenerateDriverLicenseMdoc only embeds "portrait" when non-empty
+                // (it's an optional claim), and the SD-JWT path just emits an empty string claim.
+                subject.Portrait = "data:image/jpeg;base64,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";
                 subject.DrivingPrivileges = new List<DrivingPrivilege>
-        {
-            new DrivingPrivilege { Category = "รถยนต์ส่วนบุคคล", Restrictions = new() { "ขับขี่เฉพาะเวลากลางวัน" }, Conditions = new() { "ต้องสวมแว่นตาเมื่อขับขี่" } },
-            new DrivingPrivilege { Category = "รถจักรยานยนต์", Restrictions = new() { "ต้องสวมหมวกกันน็อค" }, Conditions = new() }
-        };
+                {
+                    new DrivingPrivilege { Category = "รถยนต์ส่วนบุคคล", Restrictions = new() { "ขับขี่เฉพาะเวลากลางวัน" }, Conditions = new() { "ต้องสวมแว่นตาเมื่อขับขี่" } },
+                    new DrivingPrivilege { Category = "รถจักรยานยนต์", Restrictions = new() { "ต้องสวมหมวกกันน็อค" }, Conditions = new() }
+                };
                 subject.UnDistinguishingSign = "TH";
                 subject.AdministrativeNumber = "987654321";
-                subject.Sex = "ชาย";
+                subject.Sex = "หญิง";
                 subject.Height = 175;
                 subject.Weight = 70;
                 subject.EyeColour = "น้ำตาล";
@@ -1131,8 +1501,8 @@ namespace IssuerAPI.Service
                 subject.ResidentState = "กรุงเทพมหานคร";
                 subject.ResidentPostalCode = "10110";
                 subject.ResidentCountry = "TH";
-                subject.BiometricTemplate = "base64_encoded_biometric_data";
-                subject.GivenNameNationalCharacter = "สมศักดิ์";
+                subject.BiometricTemplate = "data:image/jpeg;base64,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";
+                subject.GivenNameNationalCharacter = "ทดสอบ";
                 subject.SignatureUsualMark = "base64_encoded_signature_image";
 
                 model.credentialStatus.Id = "https://example.com/credentials/status/3#94567";
@@ -1159,7 +1529,11 @@ namespace IssuerAPI.Service
         }
 
 
-        public JsonResult GenerateIDCardVC(string issuerid, string walletid)
+        // C-05 (partial): optional real ThaID profile (from DBService.GetRequestProfile, sourced from
+        // the id_token at login) — when present, overrides the id_number/name/gender/birthdate fields
+        // below that used to be hardcoded literals for every issuance. "religion" is removed entirely
+        // (DOPA/ThaID never sends it, real or mock).
+        public JsonResult GenerateIDCardVC(string issuerid, string walletid, ThaIDCheckStateResponse profile = null)
         {
 
             _JwtPayloadModel model = new _JwtPayloadModel();
@@ -1219,7 +1593,7 @@ namespace IssuerAPI.Service
                 docInform.Identifier = new IdentifierDocument();
                 docInform.Identifier.Type = "PropertyValue";
                 docInform.Identifier.PropertyID = "PID ID";
-                docInform.Identifier.Value = "1234567890123";
+                docInform.Identifier.Value = !string.IsNullOrWhiteSpace(profile?.PID) ? profile.PID : "1234567890123";
                 docInform.Name = "PID Name";
                 docInform.AdditionalType = "รหัสระบุประเภทเอกสาร";
                 docInform.EducationalUse = "วัตถุประสงค์";
@@ -1238,13 +1612,13 @@ namespace IssuerAPI.Service
                 item.Identifier = new Identifier();
                 item.Identifier.Type = "PropertyValue";
                 item.Identifier.Name = "IDNumber";
-                item.Identifier.Value = "1234567890123";
+                item.Identifier.Value = !string.IsNullOrWhiteSpace(profile?.PID) ? profile.PID : "1234567890123";
 
-                item.HonorificPrefix = "นางสาว";
-                item.GivenName = "ทดสอบ";
-                item.FamilyName = "เอกสารดิจิตัล";
-                item.Gender = "1";
-                item.BirthDate = "2015-01-30";
+                item.HonorificPrefix = !string.IsNullOrWhiteSpace(profile?.TitleNameTh) ? profile.TitleNameTh : "นางสาว";
+                item.GivenName = !string.IsNullOrWhiteSpace(profile?.FirstNameTh) ? profile.FirstNameTh : "ทดสอบ";
+                item.FamilyName = !string.IsNullOrWhiteSpace(profile?.LastNameTh) ? profile.LastNameTh : "เอกสารดิจิตัล";
+                item.Gender = !string.IsNullOrWhiteSpace(profile?.Gender) ? profile.Gender : "1";
+                item.BirthDate = !string.IsNullOrWhiteSpace(profile?.BirthDate) ? profile.BirthDate : "2015-01-30";
                 item.Nationality = "TH";
 
                 ResidentCountryOrTerritory res = new ResidentCountryOrTerritory();
@@ -1392,7 +1766,7 @@ namespace IssuerAPI.Service
 
         }
 
-        public string GenerateTranscriptSdJwt(string issuerid, string walletid, IWebHostEnvironment _env, string UrlBase)
+        public string GenerateTranscriptSdJwt(string issuerid, string walletid, IWebHostEnvironment _env, string UrlBase, int statusListIndex)
         {
             // ── 1. ดึง private key (Ed25519) เหมือนเดิม ──────────────
             PemReader pemReaderPrivate = new PemReader(new StringReader(GetKey(true, _env)));
@@ -1465,7 +1839,7 @@ namespace IssuerAPI.Service
 
             // cnf (confirmation) — holder binding ด้วย did:key ของ wallet
             // walletid มาจาก kid ใน proof JWT (เป็น did:key หรือ did:tbsi)
-            var cnf = new { kid = walletid };
+            var cnf = BuildCnf(walletid);
 
             var payload = new
             {
@@ -1479,6 +1853,7 @@ namespace IssuerAPI.Service
                 _sd = sdHashes,           // hashes ของ SD claims
                 _sd_alg = "sha-256",
                 cnf = cnf,
+                status = BuildStatusClaim(statusListIndex, UrlBase),
                 issued = now.ToString("yyyy-MM-ddTHH:mm:ssZ"),
                 issuanceDate = now.ToString("yyyy-MM-ddTHH:mm:ssZ"),
             };
@@ -1520,7 +1895,7 @@ namespace IssuerAPI.Service
             return sdJwt;
         }
 
-        public string GenerateDriversLicenseSdJwt(string issuerid, string walletid, IWebHostEnvironment _env, string UrlBase)
+        public string GenerateDriversLicenseSdJwt(string issuerid, string walletid, IWebHostEnvironment _env, string UrlBase, int statusListIndex)
         {
             // ── 1. ดึง private key (Ed25519) เหมือนเดิม ──────────────
             PemReader pemReaderPrivate = new PemReader(new StringReader(GetKey(true, _env)));
@@ -1581,7 +1956,7 @@ namespace IssuerAPI.Service
             long iat = ((DateTimeOffset)now).ToUnixTimeSeconds();
             long exp = ((DateTimeOffset)now.AddYears(5)).ToUnixTimeSeconds();
             string jti = $"urn:uuid:{Guid.NewGuid()}";
-            var cnf = new { kid = walletid };
+            var cnf = BuildCnf(walletid);
 
             var payload = new
             {
@@ -1597,6 +1972,7 @@ namespace IssuerAPI.Service
                 _sd = sdHashes,
                 _sd_alg = "sha-256",
                 cnf = cnf,
+                status = BuildStatusClaim(statusListIndex, UrlBase),
                 issued = now.ToString("yyyy-MM-ddTHH:mm:ssZ"),
                 issuanceDate = now.ToString("yyyy-MM-ddTHH:mm:ssZ"),
             };
@@ -1632,7 +2008,11 @@ namespace IssuerAPI.Service
             return sdJwt;
         }
 
-        public string GenerateIDCardSdJwt(string issuerid, string walletid, IWebHostEnvironment _env, string UrlBase)
+        // C-05 (partial): optional real ThaID profile, forwarded to GenerateIDCardVC and also used
+        // directly below for the "birthdate" SD claim (which used to be a hardcoded literal string,
+        // never even sourced from the mock student object). "religion" is removed entirely — DOPA
+        // doesn't send it via ThaID.
+        public string GenerateIDCardSdJwt(string issuerid, string walletid, IWebHostEnvironment _env, string UrlBase, int statusListIndex, ThaIDCheckStateResponse profile = null)
         {
             // ── 1. ดึง private key (Ed25519) เหมือนเดิม ──────────────
             PemReader pemReaderPrivate = new PemReader(new StringReader(GetKey(true, _env)));
@@ -1640,7 +2020,7 @@ namespace IssuerAPI.Service
 
             // ── 2. ดึงข้อมูล transcript จาก GenerateIDCardVC เดิม ─
             //      (ในอนาคตให้โหลดจาก DB แทน)
-            var vcResult = GenerateIDCardVC(issuerid, walletid);
+            var vcResult = GenerateIDCardVC(issuerid, walletid, profile);
             var vcPayload = vcResult.Value as vcModel ?? throw new Exception("GenerateIDCardVC failed");
 
             var student = vcPayload.vc.credentialSubject.tedastudent;
@@ -1655,10 +2035,21 @@ namespace IssuerAPI.Service
             {
                 ["id_number"] = student?.Identifier?.Value ?? "",
                 ["full_name"] = $"{student?.HonorificPrefix}{student?.GivenName} {student?.FamilyName}",
-                ["birthdate"] = "10 มิ.ย. 2530",
-                ["expiry_date"] = "11 มิ.ย. 2575",//academic?.SemesterSummaries?.FirstOrDefault()?.SemesterGPA ?? 0,
-                ["address"] = "123 ซ.พหลโยธิน 2 ถ.พหลโยธิน สามเสนใน พญาไท กทม. 11000",
-                ["religion"] = "พุทธ",
+                // ชื่อภาษาอังกฤษ — ThaID ให้ title_en/given_name_en/family_name_en มาด้วย (ดู
+                // ThaIDAuthService.GetProfile) ประกอบตรงนี้เหมือน full_name ฝั่งไทย ไม่มีค่าจริงก็ fallback mock
+                ["full_name_en"] = !string.IsNullOrWhiteSpace(profile?.FirstNameEn) || !string.IsNullOrWhiteSpace(profile?.LastNameEn)
+                    ? $"{profile?.TitleNameEn} {profile?.FirstNameEn} {profile?.LastNameEn}".Trim()
+                    : "Miss Testing Digital Document",
+                ["birthdate"] = !string.IsNullOrWhiteSpace(profile?.BirthDate) ? profile.BirthDate : "10 มิ.ย. 2530",
+                // ThaIDLogin ขอ scope "date_of_issuance"/"date_of_expiry"/"address" ไว้ด้วย (ดู
+                // AccountController.ThaIDLogin + ThaIDAuthService.GetProfile) — ใช้ค่าจริงถ้ามี ไม่งั้น
+                // fallback เป็น mock เหมือนเดิม. "issue_date" ("วันออกบัตร") เพิ่มใหม่ตรงนี้ — ก่อนหน้านี้
+                // capture DateOfIssuance ไว้ใน profile/DB แล้วแต่ไม่เคยเอามาออกเป็น claim จริงเลย
+                ["issue_date"] = !string.IsNullOrWhiteSpace(profile?.DateOfIssuance) ? profile.DateOfIssuance : "11 มิ.ย. 2570",
+                ["expiry_date"] = !string.IsNullOrWhiteSpace(profile?.DateOfExpiry) ? profile.DateOfExpiry : "11 มิ.ย. 2575",
+                // "ที่อยู่ตามบัตร" — ที่อยู่ตามทะเบียนบ้าน/บัตรประชาชนจาก ThaID id_token claim "address"
+                ["address"] = !string.IsNullOrWhiteSpace(profile?.Address) ? profile.Address : "123 ซ.พหลโยธิน 2 ถ.พหลโยธิน สามเสนใน พญาไท กทม. 11000",
+                // "religion" ตัดออก — กรมการปกครอง (DOPA) ไม่มีข้อมูลนี้ส่งมาให้ผ่าน ThaID เลย
             };
 
             // institution_name เป็น Non-SD (ไม่ผ่าน Disclosure — ฝังใน payload โดยตรง)
@@ -1703,7 +2094,7 @@ namespace IssuerAPI.Service
 
             // cnf (confirmation) — holder binding ด้วย did:key ของ wallet
             // walletid มาจาก kid ใน proof JWT (เป็น did:key หรือ did:tbsi)
-            var cnf = new { kid = walletid };
+            var cnf = BuildCnf(walletid);
 
             var payload = new
             {
@@ -1717,6 +2108,7 @@ namespace IssuerAPI.Service
                 _sd = sdHashes,           // hashes ของ SD claims
                 _sd_alg = "sha-256",
                 cnf = cnf,
+                status = BuildStatusClaim(statusListIndex, UrlBase),
                 issued = now.ToString("yyyy-MM-ddTHH:mm:ssZ"),
                 issuanceDate = now.ToString("yyyy-MM-ddTHH:mm:ssZ"),
             };
@@ -1766,7 +2158,8 @@ namespace IssuerAPI.Service
         public string GenerateBootCampSdJwt(string issuerid,
             string walletid,
             IWebHostEnvironment _env,
-            string UrlBase)
+            string UrlBase,
+            int statusListIndex)
         {
             // ── 1. ดึง private key (Ed25519) ─────────────────────────
             PemReader pemReaderPrivate = new PemReader(new StringReader(GetKey(true, _env)));
@@ -1883,7 +2276,8 @@ namespace IssuerAPI.Service
                 ["exp"] = exp,
                 ["_sd"] = sdHashes,
                 ["_sd_alg"] = "sha-256",
-                ["cnf"] = new { kid = walletid },
+                ["cnf"] = BuildCnf(walletid),
+                ["status"] = BuildStatusClaim(statusListIndex, UrlBase),
                 ["issued"] = now.ToString("yyyy-MM-ddTHH:mm:ssZ"),
                 ["issuanceDate"] = now.ToString("yyyy-MM-ddTHH:mm:ssZ"),
             };
@@ -2074,8 +2468,27 @@ namespace IssuerAPI.Service
             if (!string.IsNullOrEmpty(subject.Portrait))
             {
                 // portrait ต้องเป็น CBOR byte string (bstr) ไม่ใช่ tstr
-                byte[] portraitBytes = Convert.FromBase64String(subject.Portrait);
-                AddItem("portrait", CBORObject.FromObject(portraitBytes));
+                // subject.Portrait may be a data URI ("data:image/jpeg;base64,/9j/...") rather than
+                // raw base64 — Convert.FromBase64String only accepts the latter and throws
+                // FormatException on the "data:image/jpeg;base64," prefix (':' '/' ';' aren't valid
+                // base64 characters). Strip the prefix if present.
+                string portraitBase64 = subject.Portrait;
+                int commaIdx = portraitBase64.IndexOf(',');
+                if (portraitBase64.StartsWith("data:", StringComparison.OrdinalIgnoreCase) && commaIdx >= 0)
+                {
+                    portraitBase64 = portraitBase64[(commaIdx + 1)..];
+                }
+
+                try
+                {
+                    byte[] portraitBytes = Convert.FromBase64String(portraitBase64);
+                    AddItem("portrait", CBORObject.FromObject(portraitBytes));
+                }
+                catch (FormatException ex)
+                {
+                    // Portrait is optional — don't fail the whole mDL over malformed image data.
+                    NLog.LogManager.GetCurrentClassLogger().Warn(ex, "GenerateDriverLicenseMdoc: subject.Portrait is not valid base64/data-URI, skipping portrait element");
+                }
             }
 
             // ── 5. สร้าง valueDigests + deviceKeyInfo + validityInfo ──
@@ -2139,11 +2552,49 @@ namespace IssuerAPI.Service
         }
 
         // ── Helper: ECDSA P-256 key loader (คนละคู่จาก Ed25519 ของ SD-JWT) ──
+        //
+        // NOT ecdsa.ImportFromPem(pem): on Windows, that goes through ECDsaCng's PKCS8 blob import
+        // (CngPkcs8.ImportPkcs8PrivateKey -> CngKey.Import), which is where this specific key
+        // (PKCS8 PEM from ecdsa.ExportPkcs8PrivateKeyPem() in GetKey) throws
+        // "CryptographicException: The system cannot find the file specified" — a known .NET-on-
+        // Windows CNG quirk with PKCS8 EC key import, not a problem with the key material itself
+        // (the Jwt:PrivateKey ECDSA key elsewhere in this app loads fine via the SEC1-based
+        // ImportECPrivateKey, a different, unaffected CNG code path). Parsed with BouncyCastle
+        // instead (already a dependency here, and its PKCS8 parser never touches CNG at all), then
+        // handed to .NET as raw curve parameters via ECDsa.Create(ECParameters) — which uses CNG's
+        // ImportParameters path, not the broken PKCS8 blob path.
         private ECDsa LoadEcdsaKey(string pem)
         {
-            ECDsa ecdsa = ECDsa.Create();
-            ecdsa.ImportFromPem(pem);
-            return ecdsa;
+            var pemReader = new PemReader(new StringReader(pem));
+            object keyObject = pemReader.ReadObject();
+
+            ECPrivateKeyParameters privateKeyParams = keyObject switch
+            {
+                Org.BouncyCastle.Crypto.AsymmetricCipherKeyPair pair => (ECPrivateKeyParameters)pair.Private,
+                ECPrivateKeyParameters priv => priv,
+                _ => throw new InvalidOperationException("LoadEcdsaKey: PEM did not contain an EC private key")
+            };
+
+            var domainParams = privateKeyParams.Parameters;
+            var publicPoint = domainParams.G.Multiply(privateKeyParams.D).Normalize();
+
+            int fieldSize = (domainParams.Curve.FieldSize + 7) / 8; // 32 bytes for P-256
+            byte[] dRaw = privateKeyParams.D.ToByteArrayUnsigned();
+            byte[] d = new byte[fieldSize];
+            Array.Copy(dRaw, 0, d, fieldSize - dRaw.Length, dRaw.Length);
+
+            var ecParameters = new ECParameters
+            {
+                Curve = ECCurve.NamedCurves.nistP256,
+                D = d,
+                Q = new ECPoint
+                {
+                    X = publicPoint.AffineXCoord.GetEncoded(),
+                    Y = publicPoint.AffineYCoord.GetEncoded()
+                }
+            };
+
+            return ECDsa.Create(ecParameters);
         }
 
         // ── Helper: mapping sex ตาม ISO 5218 ──

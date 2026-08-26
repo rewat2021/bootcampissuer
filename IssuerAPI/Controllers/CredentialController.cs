@@ -175,11 +175,15 @@ namespace IssuerAPI.Controllers
                 string kid = kidElement.GetString();
 
                 // Appendix F.1: alg MUST NOT be "none", and must be an algorithm the issuer actually
-                // implements verification for. This issuer only ever asks holders to sign with EdDSA.
+                // implements verification for. Ed25519 did:key (EdDSA) is the primary holder key type;
+                // ES256 (P-256 did:key) is also supported for wallets whose key material is P-256-only
+                // (e.g. hardware-backed/secure-enclave keys that can't produce Ed25519 signatures).
                 string alg = doc.RootElement.TryGetProperty("alg", out JsonElement algElement) ? algElement.GetString() : null;
-                if (string.IsNullOrEmpty(alg) || !string.Equals(alg, "EdDSA", StringComparison.Ordinal))
+                bool algIsEdDsa = string.Equals(alg, "EdDSA", StringComparison.Ordinal);
+                bool algIsEs256 = string.Equals(alg, "ES256", StringComparison.Ordinal);
+                if (!algIsEdDsa && !algIsEs256)
                 {
-                    return BadRequest(new { error = "invalid_proof", error_description = "unsupported or missing proof alg (EdDSA required)" });
+                    return BadRequest(new { error = "invalid_proof", error_description = "unsupported or missing proof alg (EdDSA or ES256 required)" });
                 }
 
                 // Appendix F.1: typ MUST be openid4vci-proof+jwt.
@@ -221,18 +225,38 @@ namespace IssuerAPI.Controllers
                 }
 
                 walletid = kid.Split('#')[0];
+                // กลับมาใช้ did:key (_GetDID) — did:web ทำให้ wallet บางตัวมองไม่เห็น/resolve ไม่ได้
+                // (GetDidWebId ยังอยู่เผื่อใช้ในอนาคต)
                 issuerid = serv._GetDID(_env);
 
                 // C-01: decode the wallet's did:key (from kid) and actually verify the proof JWT
                 // signature against it. Previously *any* syntactically valid JWT was accepted — the
                 // signature bytes were never checked, so anyone could forge a proof for any wallet.
-                byte[] holderPublicKey = serv.DecodeEd25519DidKey(walletid);
-                if (holderPublicKey == null)
+                // Dispatch on "alg" — EdDSA (did:key z6Mk..., raw Ed25519 key) and ES256 (did:key
+                // zDn..., compressed P-256 point) use entirely different key encodings and signature
+                // algorithms, so accepting "ES256" above without branching here would mean the alg
+                // check passes but the actual signature is never genuinely verified against it.
+                bool sigOk;
+                string proofVerifyError;
+                if (algIsEdDsa)
                 {
-                    return BadRequest(new { error = "invalid_proof", error_description = "kid is not a valid did:key" });
+                    byte[] holderPublicKey = serv.DecodeEd25519DidKey(walletid);
+                    if (holderPublicKey == null)
+                    {
+                        return BadRequest(new { error = "invalid_proof", error_description = "kid is not a valid Ed25519 did:key" });
+                    }
+                    sigOk = serv.VerifyEd25519Jws(jwt, holderPublicKey, out proofVerifyError);
+                }
+                else
+                {
+                    byte[] holderPublicKey = serv.DecodeP256DidKey(walletid);
+                    if (holderPublicKey == null)
+                    {
+                        return BadRequest(new { error = "invalid_proof", error_description = "kid is not a valid P-256 did:key" });
+                    }
+                    sigOk = serv.VerifyES256Jws(jwt, holderPublicKey, out proofVerifyError);
                 }
 
-                bool sigOk = serv.VerifyEd25519Jws(jwt, holderPublicKey, out string proofVerifyError);
                 if (!sigOk)
                 {
                     logger.Warn($"proof JWT signature verification failed: {proofVerifyError}");
@@ -260,21 +284,29 @@ namespace IssuerAPI.Controllers
                 // *fresh*, validly-signed, fresh-nonce request for a configuration this grant already
                 // redeemed. Checked after the nonce is spent so a rejected duplicate doesn't leave the
                 // nonce reusable.
-                if (!dbServ.TryMarkIssued(registerId, selectedDocType))
+                // The returned id also doubles as this credential's status list index (revocation) —
+                // see VCService.BuildStatusClaim / BuildStatusListToken.
+                int? issuedId = dbServ.TryMarkIssued(registerId, selectedDocType);
+                if (issuedId == null)
                 {
                     return BadRequest(new { error = "invalid_credential_request", error_description = "this credential configuration has already been issued for this grant" });
                 }
 
                 logger.Info($"selectedDocType => {selectedDocType}");
 
+                // C-05 (partial): real ThaID profile captured at offer-creation time (null for
+                // staff/password-issued offers, or offers predating this column) — only IDCard
+                // generation below actually consumes it; every other doc type is untouched.
+                var thaIdProfile = dbServ.GetRequestProfile(registerId);
+
                 if (selectedDocType.EndsWith("dc+sd-jwt"))
                 {
                     _credential = selectedDocType switch
                     {
-                        "TranscriptCredential_dc+sd-jwt" => serv.GenerateTranscriptSdJwt(issuerid, walletid, _env, urlBase),
-                        "BootCampCredential_dc+sd-jwt" => serv.GenerateBootCampSdJwt(issuerid, walletid, _env, urlBase),
-                        "IDCard_dc+sd-jwt" => serv.GenerateIDCardSdJwt(issuerid, walletid, _env, urlBase),
-                        "Iso18013DriversLicenseCredential_dc+sd-jwt" => serv.GenerateDriversLicenseSdJwt(issuerid, walletid, _env, urlBase),
+                        "TranscriptCredential_dc+sd-jwt" => serv.GenerateTranscriptSdJwt(issuerid, walletid, _env, urlBase, issuedId.Value),
+                        "BootCampCredential_dc+sd-jwt" => serv.GenerateBootCampSdJwt(issuerid, walletid, _env, urlBase, issuedId.Value),
+                        "IDCard_dc+sd-jwt" => serv.GenerateIDCardSdJwt(issuerid, walletid, _env, urlBase, issuedId.Value, thaIdProfile),
+                        "Iso18013DriversLicenseCredential_dc+sd-jwt" => serv.GenerateDriversLicenseSdJwt(issuerid, walletid, _env, urlBase, issuedId.Value),
                         _ => throw new Exception($"Unsupported credential type: {selectedDocType}")
                     };
                     _nonce = registerId;
@@ -324,7 +356,7 @@ namespace IssuerAPI.Controllers
                     var data = selectedDocType switch
                     {
                         "TranscriptCredential_jwt_vc_json" => serv.GenerateTranscriptVC(issuerid, walletid),
-                        "IDCardCredential_jwt_vc_json" => serv.GenerateIDCardVC(issuerid, walletid),
+                        "IDCardCredential_jwt_vc_json" => serv.GenerateIDCardVC(issuerid, walletid, thaIdProfile),
                         _ => throw new Exception($"Unsupported credential type: {selectedDocType}")
                     };
 

@@ -282,5 +282,19 @@ namespace IssuerAPI.Models
         public object CredentialOffer { get; set; }
         public string CredentialOfferUri { get; set; }
         public string QrText { get; set; }
+
+        // How many seconds the pre-authorized_code embedded in this QR is valid for, so the QR page
+        // can show a countdown and auto-refresh instead of leaving a dead QR on screen.
+        public int ExpiresIn { get; set; }
+
+        // The RegisterId (== Dbrequest.RegisterId) this offer/QR was generated for. The QR page polls
+        // /credential-offer/status?id={RequestId} to detect when the wallet has actually finished the
+        // cross-device issuance (scanned the QR, redeemed the code, called /credential successfully).
+        public string RequestId { get; set; }
+
+        // Plaintext tx_code (6-digit PIN) — only ever returned here, at generation time. The server
+        // only ever stores its SHA-256 hash (DBService.SetTxCode) afterward. Shown next to the QR so
+        // the person can read it and type it into their wallet app when prompted.
+        public string TxCode { get; set; }
     }
 }

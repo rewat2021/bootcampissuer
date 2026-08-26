@@ -36,6 +36,36 @@ namespace IssuerAPI.Controllers
             _logger = logger;
         }
 
+        // Lets the QR page decide, before asking for any QR, whether this citizen already has a PID
+        // VC on record. If not, the page skips document-type selection entirely and goes straight to
+        // requesting the PID VC (IdCard) — same DB check GenerateCredentialOfferQr enforces below.
+        [Authorize]
+        [HttpGet("/credential-offer/pid-status")]
+        public IActionResult PidStatus()
+        {
+            Response.Headers["Cache-Control"] = "no-store";
+
+            var subject = User.FindFirstValue(ClaimTypes.NameIdentifier);
+            if (string.IsNullOrEmpty(subject))
+            {
+                return Unauthorized(new { error = "unauthorized" });
+            }
+
+            try
+            {
+                bool hasPidVc = new DBService().HasBeenIssuedPidVc(subject);
+                return Ok(new { has_pid_vc = hasPidVc });
+            }
+            catch (Exception ex)
+            {
+                // H-04 style: never let this leak a raw 500/empty body to the QR page's fetch() call —
+                // HasBeenIssuedPidVc already fails closed and logs internally, but guard here too in
+                // case something else in this action throws.
+                NLog.LogManager.GetCurrentClassLogger().Error(ex, "PidStatus failed");
+                return Ok(new { has_pid_vc = false });
+            }
+        }
+
         // C-05: creating a credential offer/pre-authorized code binds it to a signed-in user's
         // registerId — must not be callable anonymously.
         [Authorize]
@@ -54,6 +84,28 @@ namespace IssuerAPI.Controllers
             {
                 return Unauthorized(new { error = "unauthorized" });
             }
+
+            // Flow requirement (TEMPORARILY DISABLED per request — re-enable by uncommenting the
+            // block below): every document request must start from PID VC (the ID card credential)
+            // already being issued to this citizen's wallet. Requesting the PID VC itself is exempt
+            // (that's how you get one in the first place); everything else would be blocked until
+            // this citizen has one on record. DB-side check only — proves the issuer already issued a
+            // PID VC to this subject, not that the wallet currently still holds it.
+            //
+            // Audit note (C-05): this does NOT fully satisfy C-05's "authoritative data" requirement —
+            // Transcript/DriverLicense/etc. are still generated from mock/hardcoded subject data, not
+            // an authoritative record. What this DOES guarantee is that no document can be requested
+            // at all until the citizen has gone through PID VC issuance first, so C-05 remains open in
+            // the audit until credential generation itself reads real per-subject data.
+            DBService dbServ = new DBService();
+            // if (request.DocumentType != DocumentType.IdCard && !dbServ.HasBeenIssuedPidVc(subject))
+            // {
+            //     return BadRequest(new
+            //     {
+            //         error = "pid_vc_required",
+            //         error_description = "a PID VC (ID card credential) must be issued to this wallet before requesting other documents"
+            //     });
+            // }
 
             List<string> credentialConfigurationIds = new();
 
@@ -89,30 +141,35 @@ namespace IssuerAPI.Controllers
             // built here and thrown away — dead code that risked someone "fixing" the wrong path.
             var preAuthorizedCode = SetPreAuthorizedCode(guid, baseUrl);
 
+            //save dbrequest vc
+            dbServ.SaveRequestCredential(guid, credentialConfigurationIds, preAuthorizedCode, subject, GetThaIdProfileFromClaims());
+
+            // tx_code (companion PIN) — only for this cross-device (QR) flow. Anyone who sees/screenshots
+            // the QR before the legitimate wallet scans it would otherwise be able to redeem the code
+            // themselves; requiring a PIN shown separately (not encoded in the QR itself) closes that
+            // gap. Same-device (RedirectToWallet/BuildOffer) doesn't set this — no QR there to intercept.
+            string txCode = DBService.GenerateTxCode();
+            dbServ.SetTxCode(guid, txCode);
+
+            var preAuthGrant = new Dictionary<string, object>
+            {
+                { "pre-authorized_code", preAuthorizedCode },
+                { "tx_code", new { length = 6, input_mode = "numeric", description = "กรอกรหัส 6 หลักที่แสดงบนหน้าจอ" } }
+            };
+
             var _credentialOffer = new
             {
                 credential_issuer = baseUrl,
                 credential_configuration_ids = credentialConfigurationIds.ToArray(), //new[] { credentialConfigurationId },
                 grants = new Dictionary<string, object>
                 {
-                    {
-                        "urn:ietf:params:oauth:grant-type:pre-authorized_code",
-                        new Dictionary<string, object>
-                        {
-                            { "pre-authorized_code", preAuthorizedCode }
-                        }
-                    }
+                    { "urn:ietf:params:oauth:grant-type:pre-authorized_code", preAuthGrant }
                 }
             };
 
 
             var offer = Newtonsoft.Json.JsonConvert.SerializeObject(_credentialOffer);
             string credentialOfferUrl = "openid-credential-offer://?credential_offer_uri=" + Uri.EscapeDataString($"{baseUrl}/openid4vc/credentialOffer?id={guid}");
-
-
-            //save dbrequest vc
-            DBService dbServ = new DBService();
-            dbServ.SaveRequestCredential(guid, credentialConfigurationIds, preAuthorizedCode, subject);
 
             //string credentialOfferUrl =
             //    $"{baseUrl}/openid4vc/credentialoffer?id={stateId}";
@@ -123,10 +180,47 @@ namespace IssuerAPI.Controllers
             {
                 CredentialOffer = _credentialOffer,
                 CredentialOfferUri = credentialOfferUrl,
-                QrText = QRCode
+                QrText = QRCode,
+                ExpiresIn = (int)DBService.PreAuthorizedCodeTtl.TotalSeconds,
+                RequestId = guid,
+                TxCode = txCode
             };
 
             return Ok(response);
+        }
+
+        // Cross-device flow: the QR page polls this while the QR is on screen to find out once the
+        // wallet has scanned it, redeemed the pre-authorized_code, and successfully called
+        // /credential — at which point the page swaps to a "ออกเอกสารสำเร็จแล้ว" screen instead of
+        // leaving a stale QR up. Scoped to the caller's own subject (see
+        // HasCredentialBeenIssuedForOffer) so this can't be used to probe other people's offers.
+        [Authorize]
+        [HttpGet("/credential-offer/status")]
+        public IActionResult OfferStatus([FromQuery] string id)
+        {
+            Response.Headers["Cache-Control"] = "no-store";
+
+            var subject = User.FindFirstValue(ClaimTypes.NameIdentifier);
+            if (string.IsNullOrEmpty(subject))
+            {
+                return Unauthorized(new { error = "unauthorized" });
+            }
+
+            if (string.IsNullOrWhiteSpace(id))
+            {
+                return BadRequest(new { error = "invalid_request", error_description = "id is required" });
+            }
+
+            try
+            {
+                bool issued = new DBService().HasCredentialBeenIssuedForOffer(id, subject);
+                return Ok(new { issued });
+            }
+            catch (Exception ex)
+            {
+                NLog.LogManager.GetCurrentClassLogger().Error(ex, "OfferStatus failed");
+                return Ok(new { issued = false });
+            }
         }
 
         // Same-device (ใหม่): wallet เปิด browser มาที่นี่ตรงๆ หลัง login สำเร็จ
@@ -141,6 +235,17 @@ namespace IssuerAPI.Controllers
             var subject = User.FindFirstValue(ClaimTypes.NameIdentifier);
             if (string.IsNullOrEmpty(subject))
                 return Unauthorized(new { error = "unauthorized" });
+
+            // Same PID-VC-first requirement as GenerateCredentialOfferQr above — TEMPORARILY DISABLED,
+            // see the comment there for why/how to re-enable.
+            // if (documentType != DocumentType.IdCard && !new DBService().HasBeenIssuedPidVc(subject))
+            // {
+            //     return BadRequest(new
+            //     {
+            //         error = "pid_vc_required",
+            //         error_description = "a PID VC (ID card credential) must be issued to this wallet before requesting other documents"
+            //     });
+            // }
 
             var built = BuildOffer(documentType, subject);
             _logger.LogInformation($"start credential offer same device");
@@ -201,9 +306,38 @@ namespace IssuerAPI.Controllers
             // C-05: subject now actually persisted (DBService.SaveRequestCredential / Dbrequest.Subject)
             // instead of being computed and thrown away.
             DBService dbServ = new DBService();
-            dbServ.SaveRequestCredential(guid, credentialConfigurationIds, preAuthorizedCode, subject);
+            dbServ.SaveRequestCredential(guid, credentialConfigurationIds, preAuthorizedCode, subject, GetThaIdProfileFromClaims());
 
             return (credentialOfferObject, credentialOfferUrl);
+        }
+
+        // C-05 (partial): rebuild the ThaID profile from the claims AccountController.ThaiIDCallback
+        // put on the cookie (title/given/family/birthdate/gender), so it can be persisted against this
+        // offer's registerId. Returns null for staff/password logins (no ThaID claims present) — those
+        // callers keep falling back to mock data downstream, same behavior as before this change.
+        private ThaIDCheckStateResponse GetThaIdProfileFromClaims()
+        {
+            var givenName = User.FindFirstValue(ClaimTypes.GivenName);
+            var surname = User.FindFirstValue(ClaimTypes.Surname);
+            if (string.IsNullOrWhiteSpace(givenName) && string.IsNullOrWhiteSpace(surname))
+            {
+                return null;
+            }
+
+            return new ThaIDCheckStateResponse
+            {
+                TitleNameTh = User.FindFirstValue("thaid_title"),
+                FirstNameTh = givenName,
+                LastNameTh = surname,
+                BirthDate = User.FindFirstValue(ClaimTypes.DateOfBirth),
+                Gender = User.FindFirstValue(ClaimTypes.Gender),
+                Address = User.FindFirstValue(ClaimTypes.StreetAddress),
+                DateOfIssuance = User.FindFirstValue("thaid_date_of_issuance"),
+                DateOfExpiry = User.FindFirstValue("thaid_date_of_expiry"),
+                TitleNameEn = User.FindFirstValue("thaid_title_en"),
+                FirstNameEn = User.FindFirstValue("thaid_given_name_en"),
+                LastNameEn = User.FindFirstValue("thaid_family_name_en")
+            };
         }
 
         private string SetPreAuthorizedCode(string id, string credential_issuer)
@@ -268,19 +402,27 @@ namespace IssuerAPI.Controllers
                 return BadRequest(new { message = "pre-authorized_code is invalid, expired, or already used ❌" });
             }
 
+            // tx_code — this is the endpoint a real wallet actually calls to resolve credential_offer_uri
+            // (the QR only encodes a link to here), so this is where the tx_code requirement must show up
+            // for it to take effect. Mirrors whatever GenerateCredentialOfferQr decided when the offer was
+            // created (PIN set only for cross-device/QR offers) — read back from the stored hash rather
+            // than re-deciding here, so this endpoint can't drift out of sync with what was promised.
+            var preAuthGrant = new Dictionary<string, object>
+            {
+                { "pre-authorized_code", accessCode.authoriseCode }
+            };
+            if (serv.HasTxCode(id))
+            {
+                preAuthGrant["tx_code"] = new { length = 6, input_mode = "numeric", description = "กรอกรหัส 6 หลักที่แสดงบนหน้าจอ" };
+            }
+
             var credentialOffer = new
             {
                 credential_issuer = baseUrl,
                 credential_configuration_ids = credentialConfigurationIds,
                 grants = new Dictionary<string, object>
                 {
-                    {
-                        "urn:ietf:params:oauth:grant-type:pre-authorized_code",
-                        new Dictionary<string, object>
-                        {
-                            { "pre-authorized_code", accessCode.authoriseCode }
-                        }
-                    }
+                    { "urn:ietf:params:oauth:grant-type:pre-authorized_code", preAuthGrant }
                 }
             };
 

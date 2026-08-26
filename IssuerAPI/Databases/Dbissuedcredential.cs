@@ -12,4 +12,8 @@ public partial class Dbissuedcredential
     public string CredentialConfigurationId { get; set; } = null!;
 
     public DateTime? IssuedAt { get; set; }
+
+    public bool Revoked { get; set; }
+
+    public DateTime? RevokedAt { get; set; }
 }

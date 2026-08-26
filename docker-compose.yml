@@ -5,7 +5,9 @@ services:
     image: mysql:8.0
     container_name: issuer-mysql
     environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-P@ssw0rd@1234}
+      # C-06: no default — a hardcoded real-looking password here was committed to source before.
+      # Set MYSQL_ROOT_PASSWORD in your .env file (gitignored); compose fails fast if it's unset.
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD in .env}
       MYSQL_DATABASE: issuer
     volumes:
       - issuer-mysql-data:/var/lib/mysql
@@ -13,7 +15,7 @@ services:
     ports:
       - "3306:3306"
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-p${MYSQL_ROOT_PASSWORD:-P@ssw0rd@1234}"]
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-p${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD in .env}"]
       interval: 10s
       timeout: 5s
       retries: 10

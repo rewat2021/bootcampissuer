@@ -78,6 +78,19 @@ namespace IssuerAPI.Controllers
                 };
             }
 
+            // tx_code (companion PIN, cross-device/QR offers only — see CredentialOfferController.
+            // GenerateCredentialOfferQr / DBService.SetTxCode). Checked before consuming the code so a
+            // wrong PIN doesn't burn the wallet's one shot at the real code — they can just retry with
+            // the correct PIN until the code itself expires. VerifyTxCode returns true for offers that
+            // never had a PIN set (same-device), so this is a no-op for that flow.
+            if (!dbServ.VerifyTxCode(registerId, request.TxCode))
+            {
+                return new JsonResult(new { error = "invalid_grant", error_description = "tx_code is missing or incorrect" })
+                {
+                    StatusCode = 400
+                };
+            }
+
             bool consumed = dbServ.ConsumePreAuthorizedCode(registerId, request.PreAuthorizedCode);
             if (!consumed)
             {

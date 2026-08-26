@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.Extensions.Options;
 using Org.BouncyCastle.Crypto.Parameters;
 using Org.BouncyCastle.Crypto.Signers;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Org.BouncyCastle.OpenSsl;
@@ -74,7 +75,7 @@ namespace IssuerAPI.Controllers
         [Authorize(Roles = "admin")]
         [Route("/generate-jwt-ed25519")]
         [HttpPost]
-        public string GenerateJWTEd25519(string nonce) //, string iss)
+        public string GenerateJWTEd25519(string nonce, string? credentialConfigurationId = null) //, string iss)
         {
             VCService serv = new VCService();
             PemReader pemReaderPrivate = new PemReader(new StringReader(serv.GetKey(true, _env)));
@@ -85,27 +86,47 @@ namespace IssuerAPI.Controllers
             {
                 WriteIndented = true
             };
-            var header = new Dictionary<string, string>()
+            var header = new Dictionary<string, object>()
             {
                 {
                     "alg", "EdDSA"
                 },
                 {
-                    "typ", "JWT"
+                    //"typ", "JWT"
+                    "typ", "openid4vci-proof+jwt"
                 },
                 {
                     "kid",util.GetDID(_env)
                 },
             };
 
-            if (header["alg"] == "none" || string.IsNullOrEmpty(header["alg"]))
+            if ((string)header["alg"] == "none" || string.IsNullOrEmpty((string)header["alg"]))
             {
                 return "Error";
             }
 
-            if (header["typ"] == "none" || string.IsNullOrEmpty(header["typ"]))
+            if ((string)header["typ"] == "none" || string.IsNullOrEmpty((string)header["typ"]))
             {
                 return "Error";
+            }
+
+            // org.iso.18013.5.1.mDL (mso_mdoc) requires a P-256 device public key in the proof's
+            // "jwk" header — see CredentialController's mdoc branch and Appendix A.2
+            // (cryptographic_binding_methods_supported: ["cose_key"]). This is separate from "kid",
+            // which is only used to verify the proof JWT's own signature. Real wallets supply their
+            // own device key here; for Swagger-driven testing we generate a throwaway P-256 key pair
+            // on the fly so the mDL flow can be exercised end-to-end.
+            if (string.Equals(credentialConfigurationId, "org.iso.18013.5.1.mDL", StringComparison.Ordinal))
+            {
+                using var ecdsa = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+                ECParameters ecParams = ecdsa.ExportParameters(false);
+                header["jwk"] = new Dictionary<string, string>
+                {
+                    { "kty", "EC" },
+                    { "crv", "P-256" },
+                    { "x", WebEncoders.Base64UrlEncode(ecParams.Q.X) },
+                    { "y", WebEncoders.Base64UrlEncode(ecParams.Q.Y) },
+                };
             }
 
             // H-11: use the same canonical issuer base URL as everywhere else, instead of trusting
@@ -173,6 +194,8 @@ namespace IssuerAPI.Controllers
             try
             {
                 VCService vcServ = new VCService();
+                // กลับมาใช้ did:key (_GetDID) ให้ตรงกับ flow ออก VC จริง (CredentialController) และ
+                // status list (IssuerController) ที่สลับกลับมาแล้ว — wallet มองไม่เห็น/resolve did:web ไม่ได้
                 string did = vcServ._GetDID(_env);
 
                 return Ok(new

@@ -91,6 +91,12 @@ namespace IssuerAPI.Models
         [JsonPropertyName("given_name")]
         public string GivenName { get; set; }
 
+        [JsonPropertyName("family_name_eng")]
+        public string FamilyNameEng { get; set; }
+
+        [JsonPropertyName("given_name_eng")]
+        public string GivenNameEng { get; set; }
+
         [JsonPropertyName("birth_date")]
         public string BirthDate { get; set; }
 

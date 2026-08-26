@@ -377,3 +377,11 @@ IssuerAPI/command.txt
 # C-06: launchSettings.json now carries a real local-dev DB connection string (CONNECTION_STRING).
 # This file is per-developer by convention and should not be committed with real credentials in it.
 **/Properties/launchSettings.json
+
+# C-06: web.config now carries real IIS-hosting secrets (Jwt__PrivateKey, ThaIDConfig__ClientID/
+# ClientSecret, CONNECTION_STRING) in its <environmentVariables> block. Was previously tracked with
+# no secrets in it — if it was ever committed before this line was added, run
+# `git rm --cached IssuerAPI/web.config` once so future commits actually stop picking it up (adding
+# a path here only affects untracked files, it does not untrack a file already in the index).
+IssuerAPI/web.config
+**/web.config

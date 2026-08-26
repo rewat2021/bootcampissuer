@@ -22,6 +22,16 @@ public class AccountController : Controller
 
     private const string PendingReturnCookie = "thaiid_pending_return";
 
+    // _service was declared readonly but never assigned anywhere in this class — with no
+    // constructor at all, it stayed null, so any _service.* call in ThaiIDCallback would throw
+    // NullReferenceException the first time anyone actually completed the ThaID flow.
+    // ThaIDAuthService is already registered for DI in Program.cs
+    // (builder.Services.AddHttpClient<ThaIDAuthService>();), so the framework injects it here.
+    public AccountController(ThaIDAuthService service)
+    {
+        _service = service;
+    }
+
     [HttpGet]
     [AllowAnonymous]
     public IActionResult Login(string? ReturnUrl, DocumentType? documentType)
@@ -128,10 +138,25 @@ public class AccountController : Controller
         return View();
     }
 
+    // C-06: this used to compare passwords with plain `==` — meaning `users.password` in the
+    // database was plaintext (confirmed: the committed db/init.sql seed had a real password stored
+    // as literally "1234"). BCrypt.Verify handles its own salt extraction from the stored hash, so
+    // no separate salt column/config is needed. Existing rows with a plaintext value in `password`
+    // will fail to verify (BCrypt.Verify throws/returns false on a non-BCrypt hash) — that's
+    // intentional; those accounts must be reset with a properly hashed password, not silently
+    // grandfathered in as valid.
     private bool VerifyPassword(string inputPassword, string storedPassword)
     {
-        return inputPassword == storedPassword;
-        // return BCrypt.Net.BCrypt.Verify(inputPassword, storedPassword);
+        try
+        {
+            return BCrypt.Net.BCrypt.Verify(inputPassword, storedPassword);
+        }
+        catch (BCrypt.Net.SaltParseException)
+        {
+            // storedPassword isn't a valid BCrypt hash (e.g. a legacy plaintext row) — treat as a
+            // failed login rather than throwing a 500 back to the caller.
+            return false;
+        }
     }
 
     [HttpGet]
@@ -150,41 +175,49 @@ public class AccountController : Controller
     {
         try
         {
-            string clientId = ThaIDConfig.ClientID;
+            //string clientId = ThaIDConfig.ClientID;
 
             // Gateway (.155) endpoint ที่แสดงหน้า QR ให้ user สแกนด้วยแอป ThaID
-            string authUrl = $"{ThaIDConfig.GatewayBaseUrl}/auth/index?clientid={clientId}&role=Issuer&ReturnUrl={ReturnUrl}&documentType={documentType}";
+            //string authUrl = $"{ThaIDConfig.GatewayBaseUrl}/auth/index?clientid={clientId}&role=Issuer&ReturnUrl={ReturnUrl}&documentType={documentType}";
 
-            // เก็บ returnUrl/documentType ไว้ใน cookie ชั่วคราว (HttpOnly, อายุสั้น)
-            // เพราะ browser จะออกจากหน้า .205 ไปที่ .155 แล้ววนกลับมาที่ ThaiIDCallback
-            // โดยไม่มีทางส่ง custom parameter ผ่าน .155/ThaID ไปกลับมาได้เอง
-            var pending = new { ReturnUrl = ReturnUrl, DocumentType = documentType };
-            Response.Cookies.Append(PendingReturnCookie, JsonConvert.SerializeObject(pending), new CookieOptions
+            // เก็บ returnUrl/documentType ไว้ใน cookie ชั่วคราว (HttpOnly, อายุสั้น) เพราะ browser จะออกจาก
+            // หน้านี้ไปที่ ThaID แล้ววนกลับมาที่ ThaiIDCallback โดยไม่มีทางส่ง custom parameter ผ่าน ThaID ไป-
+            // กลับมาได้เอง (ThaID ส่งกลับมาแค่ code/state ที่มันควบคุมเอง)
+            //
+            // บั๊กที่แก้: บล็อกนี้เคย comment ทิ้งไว้ทั้งก้อน — แปลว่า ReturnUrl/documentType ที่รับเข้ามาถูก
+            // ทิ้งไปเฉยๆ ไม่เคยถูกเก็บที่ไหนเลย ผลคือ ThaiIDCallback อ่าน cookie ไม่เจอทุกครั้ง (pendingReturnUrl
+            // เป็น null เสมอ) จึง fall through ไปทาง fallback (/QR/QRCode) ตลอด ไม่ว่าจะ login มาจาก flow
+            // same-device (wallet เปิด browser มาขอ redirect ตรง) หรือไม่ก็ตาม — same-device เลยเห็น QR
+            // page เหมือน cross-device ทุกครั้ง ทั้งที่ควรจะ redirect ตรงไป wallet เลยโดยไม่ต้อง scan
+            if (!string.IsNullOrEmpty(ReturnUrl) || documentType != null)
             {
-                HttpOnly = true,
-                Secure = true,
-                SameSite = SameSiteMode.Lax,
-                Expires = DateTimeOffset.UtcNow.AddMinutes(10)
-            });
+                var pending = new { ReturnUrl = ReturnUrl, DocumentType = documentType };
+                Response.Cookies.Append(PendingReturnCookie, JsonConvert.SerializeObject(pending), new CookieOptions
+                {
+                    HttpOnly = true,
+                    Secure = true,
+                    SameSite = SameSiteMode.Lax,
+                    Expires = DateTimeOffset.UtcNow.AddMinutes(10)
+                });
+            }
 
+            string state = Guid.NewGuid().ToString("N");
+            string clientId = ThaIDConfig.ClientID;
+            string clientSecret = ThaIDConfig.ClientSecret;
+            string redirectUri = $"{Request.Scheme}://{Request.Host}" + ThaIDConfig.RedirectURL;
+            string scope = ThaIDConfig.Scope;
+            string Issuer = ThaIDConfig.Issuer + "api/v2/oauth2/auth/?";
+
+            log.Info($"redirect_uri => {redirectUri}");
+            scope = "pid%20given_name%20family_name%20given_name_en%20family_name_en%20gender%20title%20title_en%20date_of_issuance%20date_of_expiry%20address%20birthdate";
+            string authUrl = Issuer +
+                               "response_type=code" +
+                               "&client_id=" + clientId +
+                               "&redirect_uri=" + HttpUtility.UrlEncode(redirectUri) +
+                               "&scope=" + scope + "%20openid" +
+                               "&state=" + state;
+            //HttpUtility.UrlEncode(scope) 
             return Redirect(authUrl);
-
-            //string state = Guid.NewGuid().ToString("N");
-            //string clientId = ThaIDConfig.ClientID;
-            //string clientSecret = ThaIDConfig.ClientSecret;
-            //string redirectUri = $"{Request.Scheme}://{Request.Host}" + ThaIDConfig.RedirectURL;
-            //string scope = ThaIDConfig.Scope;
-            //string Issuer = ThaIDConfig.Issuer + "api/v2/oauth2/auth/?";
-
-            //log.Info($"redirect_uri => {redirectUri}");
-            //string authUrl = Issuer +
-            //                   "response_type=code" +
-            //                   "&client_id=" + clientId +
-            //                   "&redirect_uri=" + HttpUtility.UrlEncode(redirectUri) +
-            //                   "&scope=" + HttpUtility.UrlEncode(scope) + "%20openid" +
-            //                   "&state=" + state;
-
-            //return Redirect(authUrl);
 
 
             //return Redirect(Issuer +
@@ -225,24 +258,27 @@ public class AccountController : Controller
                 return RedirectToAccountLogin("ไม่พบ state จาก ThaiID");
             }
 
-            // 4) ขอ system token จาก Gateway (.155)
-            var systemToken = await _service.GetSystemTokenAsync();
-            if (systemToken == null || string.IsNullOrWhiteSpace(systemToken.AccessToken))
+            // 4) แลก code -> token กับ DOPA ThaID โดยตรง (endpoint เดียวกับที่ ThaIDLogin ยิงไป authorize)
+            string redirectUri = $"{Request.Scheme}://{Request.Host}" + ThaIDConfig.RedirectURL;
+            var token = await _service.GetAccessTokenAsync(code, $"{redirectUri}");
+            if (token == null || string.IsNullOrWhiteSpace(token.IDToken))
             {
-                log.Error("GetSystemTokenAsync failed for state check");
-                return RedirectToAccountLogin("ไม่สามารถขอ system token สำหรับตรวจสอบ state ได้");
+                log.Error("GetAccessTokenAsync failed or id_token missing");
+                return RedirectToAccountLogin("ไม่สามารถขอ token จาก ThaiID ได้");
             }
 
-            // 5) check state ที่ Gateway (.155) -> ได้ PID + citizen data กลับมา
-            var stateResult = await _service.CheckStateAsync(state, systemToken.AccessToken);
-            if (stateResult == null || string.IsNullOrWhiteSpace(stateResult.PID))
+            // 5) ดึง PID + ข้อมูลส่วนตัวจาก claims ใน id_token โดยตรง — ไม่ต้องเรียก Gateway แยกอีกรอบ
+            // (จุดนี้เดิมเรียก CheckStateAsync ซึ่ง compile ไม่ผ่าน: อ้าง ThaIDSystemTokenResponse.IDTokenClaims
+            // ที่ไม่มีอยู่จริง และ return type ไม่ตรงกับ signature ที่ประกาศไว้)
+            string citizenId = _service.GetCitizenId(token);
+            if (string.IsNullOrWhiteSpace(citizenId))
             {
-                log.Error("CheckStateAsync failed or PID missing => state=" + state);
-                return RedirectToAccountLogin("ไม่สามารถยืนยันตัวตนผ่าน ThaID ได้ (state ไม่ถูกต้องหรือหมดอายุ)");
+                log.Error("GetCitizenId failed or pid/sub missing from id_token => state=" + state);
+                return RedirectToAccountLogin("ไม่สามารถยืนยันตัวตนผ่าน ThaID ได้ (ไม่พบ PID ใน id_token)");
             }
+            var stateResult = _service.GetProfile(token);
 
-            log.Info("CheckState PID => " + stateResult.PID);
-            string citizenId = stateResult.PID;
+            log.Info("id_token PID => " + citizenId);
 
             // 6) อ่าน returnUrl/documentType ที่เก็บไว้ก่อนไป .155
             string? pendingReturnUrl = null;
@@ -264,11 +300,45 @@ public class AccountController : Controller
                     new Claim(ClaimTypes.NameIdentifier, citizenId),
                 };
 
-            var fullNameTh = $"{stateResult.FirstNameTh} {stateResult.LastNameTh}".Trim();
+            var fullNameTh = $"{stateResult?.FirstNameTh} {stateResult?.LastNameTh}".Trim();
             if (!string.IsNullOrWhiteSpace(fullNameTh))
             {
                 claims.Add(new Claim(ClaimTypes.Name, fullNameTh));
             }
+
+            // C-05 (partial): carry the rest of the ThaID profile (title/given/family/birthdate/gender)
+            // through as claims too, not just the display name — CredentialOfferController reads these
+            // back at offer-creation time and persists them against the registerId so credential
+            // issuance (GenerateIDCardVC/SdJwt) can use real data instead of hardcoded mock values.
+            // Standard ClaimTypes used where one exists; "thaid_title" is a custom type since there's
+            // no ClaimTypes equivalent for a Thai honorific prefix.
+            if (!string.IsNullOrWhiteSpace(stateResult?.TitleNameTh))
+                claims.Add(new Claim("thaid_title", stateResult.TitleNameTh));
+            if (!string.IsNullOrWhiteSpace(stateResult?.FirstNameTh))
+                claims.Add(new Claim(ClaimTypes.GivenName, stateResult.FirstNameTh));
+            if (!string.IsNullOrWhiteSpace(stateResult?.LastNameTh))
+                claims.Add(new Claim(ClaimTypes.Surname, stateResult.LastNameTh));
+            if (!string.IsNullOrWhiteSpace(stateResult?.BirthDate))
+                claims.Add(new Claim(ClaimTypes.DateOfBirth, stateResult.BirthDate));
+            if (!string.IsNullOrWhiteSpace(stateResult?.Gender))
+                claims.Add(new Claim(ClaimTypes.Gender, stateResult.Gender));
+            // ThaIDLogin ขอ scope "address date_of_issuance date_of_expiry" ไว้ด้วย — เพิ่ม claims ให้ครบ
+            // (custom claim types: ไม่มี ClaimTypes มาตรฐานสำหรับ 3 ค่านี้)
+            if (!string.IsNullOrWhiteSpace(stateResult?.Address))
+                claims.Add(new Claim(ClaimTypes.StreetAddress, stateResult.Address));
+            if (!string.IsNullOrWhiteSpace(stateResult?.DateOfIssuance))
+                claims.Add(new Claim("thaid_date_of_issuance", stateResult.DateOfIssuance));
+            if (!string.IsNullOrWhiteSpace(stateResult?.DateOfExpiry))
+                claims.Add(new Claim("thaid_date_of_expiry", stateResult.DateOfExpiry));
+            // ชื่อภาษาอังกฤษ — ThaID ให้มาด้วย (title_en/given_name_en/family_name_en) แต่ก่อนหน้านี้
+            // GetProfile() ดึงมาอยู่แล้ว (TitleNameEn/FirstNameEn/LastNameEn) เพียงแต่ไม่เคยส่งต่อผ่าน claims
+            // ลงไปถึง VC เลย — เพิ่ม custom claim type เพราะ ClaimTypes.GivenName/Surname ถูกใช้กับชื่อไทยแล้ว
+            if (!string.IsNullOrWhiteSpace(stateResult?.TitleNameEn))
+                claims.Add(new Claim("thaid_title_en", stateResult.TitleNameEn));
+            if (!string.IsNullOrWhiteSpace(stateResult?.FirstNameEn))
+                claims.Add(new Claim("thaid_given_name_en", stateResult.FirstNameEn));
+            if (!string.IsNullOrWhiteSpace(stateResult?.LastNameEn))
+                claims.Add(new Claim("thaid_family_name_en", stateResult.LastNameEn));
 
             var claimsIdentity = new ClaimsIdentity(claims, CookieAuthenticationDefaults.AuthenticationScheme);
             var authProperties = new AuthenticationProperties
@@ -299,8 +369,11 @@ public class AccountController : Controller
                 return Redirect(pendingReturnUrl);
             }
 
-            // 9) fallback : ส่งต่อไปหน้าขอ VC พร้อม citizenId
-            return RedirectToAction("RequestVC", "Services", new { citizenId });
+            // 9) fallback : ส่งต่อไปหน้าขอเอกสาร (QR) — เดิม redirect ไป "Services/RequestVC" ซึ่งไม่มี
+            // controller/action นี้อยู่จริงในโปรเจกต์เลย (404 "No webpage was found" ทุกครั้งที่ login
+            // ตรงๆ ผ่าน ThaID โดยไม่ได้มาจาก wallet-initiated flow) — เปลี่ยนไปหน้า /QR/QRCode ซึ่งเป็นหน้า
+            // ขอเอกสารจริงที่ใช้งานได้ (ต้อง [Authorize] อยู่แล้ว และตอนนี้มีคุกกี้ที่เพิ่ง sign-in ไปพร้อมแล้ว)
+            return RedirectToAction("QRCode", "QR");
         }
         catch (Exception ex)
         {
@@ -315,171 +388,12 @@ public class AccountController : Controller
     }
 
 
-    [HttpGet]
-    [AllowAnonymous]
-    [Route("Account/ThaIDSignIn")]
-    public async Task<IActionResult> ThaIDSignIn(string pid, string? ReturnUrl, DocumentType? documentType)
-    {
-        if (string.IsNullOrWhiteSpace(pid))
-        {
-            return RedirectToAction("ThaIDLogin", "Account", new { error = "ไม่พบข้อมูลยืนยันตัวตน" });
-        }
-
-        var claims = new List<Claim> { new Claim(ClaimTypes.NameIdentifier, pid) };
-        var claimsIdentity = new ClaimsIdentity(claims, CookieAuthenticationDefaults.AuthenticationScheme);
-        var authProperties = new AuthenticationProperties
-        {
-            IsPersistent = false,
-            ExpiresUtc = DateTimeOffset.UtcNow.AddMinutes(60)
-        };
-
-        await HttpContext.SignInAsync(
-            CookieAuthenticationDefaults.AuthenticationScheme,
-            new ClaimsPrincipal(claimsIdentity),
-            authProperties);
-
-        // คำนวณปลายทางสุดท้ายไว้ก่อน แต่ยังไม่ redirect ทันที
-        string finalUrl;
-        if (!string.IsNullOrEmpty(ReturnUrl) && IsAllowedWalletRedirect(ReturnUrl))
-        {
-            if (documentType == null)
-            {
-                return RedirectToAction("ThaIDLogin", "Account",
-                    new { error = "documentType is required for wallet-initiated requests" });
-            }
-            finalUrl = Url.Action("RedirectToWallet", "CredentialOffer", new { documentType = documentType.Value })!;
-        }
-        else if (!string.IsNullOrEmpty(ReturnUrl) && Url.IsLocalUrl(ReturnUrl))
-        {
-            finalUrl = ReturnUrl;
-        }
-        else
-        {
-            finalUrl = Url.Action("QRCode", "QR")!;
-        }
-
-        // ★ ใช้หน้า HTML เล็กๆ ทำ client-side redirect แทน HTTP redirect ตรงๆ ★
-        // เพื่อให้แน่ใจว่า cookie ถูก set/commit เสร็จสมบูรณ์ก่อน browser จะ navigate ต่อ
-        string html = $@"
-<!DOCTYPE html>
-<html lang=""th"">
-<head>
-    <meta charset=""UTF-8"" />
-    <meta http-equiv=""refresh"" content=""0;url={finalUrl}"" />
-    <title>กำลังเข้าสู่ระบบ</title>
-    <style>
-        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-        body {{
-            font-family: ""Sarabun"", ""Noto Sans Thai"", Arial, sans-serif;
-            min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            background: #f5f6fa;
-        }}
-        .waiting-card {{
-            text-align: center;
-            padding: 40px;
-        }}
-        .spinner {{
-            width: 56px;
-            height: 56px;
-            margin: 0 auto 24px;
-            border: 5px solid #e0e4f5;
-            border-top-color: #14276e;
-            border-radius: 50%;
-            animation: spin 0.8s linear infinite;
-        }}
-        @keyframes spin {{
-            to {{ transform: rotate(360deg); }}
-        }}
-        h1 {{
-            font-size: 18px;
-            color: #0a1f6b;
-            font-weight: 600;
-            margin-bottom: 8px;
-        }}
-        p {{
-            font-size: 14px;
-            color: #8a8a8a;
-        }}
-    </style>
-</head>
-<body>
-    <div class=""waiting-card"">
-        <div class=""spinner""></div>
-        <h1>กำลังเข้าสู่ระบบ</h1>
-        <p>กรุณารอสักครู่...</p>
-    </div>
-
-    <script>
-        window.location.replace(""{finalUrl}"");
-    </script>
-</body>
-</html>";
-
-        return Content(html, "text/html");
-
-    }
-
-
-
-
-    //[HttpGet]
-    //[AllowAnonymous]
-    //[Route("Account/ThaIDSignIn")]
-    //public async Task<IActionResult> ThaIDSignIn(string pid, string? ReturnUrl, DocumentType? documentType)
-    //{
-    //    if (string.IsNullOrWhiteSpace(pid))
-    //    {
-    //        return RedirectToAction("ThaIDLogin", "Account", new { error = "ไม่พบข้อมูลยืนยันตัวตน" });
-    //    }
-
-    //    // sign-in cookie ให้ user ก่อน (แทนการเช็ค username/password เหมือนของเดิม
-    //    // เพราะ pid ที่ได้มา ผ่านการยืนยันตัวตนจริงจาก ThaID แล้ว)
-    //    var claims = new List<Claim>
-    //    {
-    //        new Claim(ClaimTypes.NameIdentifier, pid)
-    //    };
-
-    //    var claimsIdentity = new ClaimsIdentity(claims, CookieAuthenticationDefaults.AuthenticationScheme);
-    //    var authProperties = new AuthenticationProperties
-    //    {
-    //        IsPersistent = false,
-    //        ExpiresUtc = DateTimeOffset.UtcNow.AddMinutes(60)
-    //    };
-
-    //    await HttpContext.SignInAsync(
-    //        CookieAuthenticationDefaults.AuthenticationScheme,
-    //        new ClaimsPrincipal(claimsIdentity),
-    //        authProperties);
-
-    //    // -------------------------------------------------------
-    //    // เช็ค same-device / cross-device เหมือนของเดิม (จาก Login แบบ username/password)
-    //    // -------------------------------------------------------
-
-    //    // Cross-device: ReturnUrl เป็น wallet scheme (walletapp://...)
-    //    log.Info($"returnurl => {ReturnUrl}");
-    //    if (!string.IsNullOrEmpty(ReturnUrl) && IsAllowedWalletRedirect(ReturnUrl))
-    //    {
-    //        if (documentType == null)
-    //        {
-    //            // ไม่มี View(user) ให้ return แบบเดิมแล้ว (ไม่ใช่ POST form) — ส่ง error กลับไปหน้า login แทน
-    //            return RedirectToAction("ThaIDLogin", "Account",
-    //                new { error = "documentType is required for wallet-initiated requests" });
-    //        }
-
-    //        return RedirectToAction("RedirectToWallet", "CredentialOffer",
-    //            new { documentType = documentType.Value });
-    //    }
-
-    //    // Same-device: ReturnUrl เป็น local URL ปกติ
-    //    if (!string.IsNullOrEmpty(ReturnUrl) && Url.IsLocalUrl(ReturnUrl))
-    //    {
-    //        return Redirect(ReturnUrl);
-    //    }
-
-    //    // Fallback: ไม่มี ReturnUrl เลย → ไปหน้า QRCode ตามปกติ
-    //    return RedirectToAction("QRCode", "QR");
-    //}
+    // SECURITY (removed): this used to be an [AllowAnonymous] GET action
+    // ("Account/ThaIDSignIn?pid=...") that signed the caller in as whatever "pid" was passed in the
+    // query string, with zero verification that they'd actually authenticated via ThaID — a full
+    // authentication bypass (anyone could impersonate any citizen by ID number). Confirmed nothing in
+    // this project ever called it (no link, redirect, or JS reference anywhere) — ThaiIDCallback above
+    // already signs the user in directly and correctly after verifying the code/token with ThaID, so
+    // this was dead, exploitable code left over from adapting an older reference implementation.
+    // Removed rather than fixed since it served no purpose here.
 }

@@ -90,50 +90,7 @@ public class VctTypeMetadataController : ControllerBase
         return Ok(metadata);
     }
 
-    //[HttpGet("credentials/BootCampCredential")]
-    //[HttpGet(".well-known/vct/credentials/BootCampCredential")]
-    //[ProducesResponseType(typeof(VctTypeMetadata), StatusCodes.Status200OK)]
-    //public IActionResult GetBootCampCredential()
-    //{
-    //    var metadata = new VctTypeMetadata
-    //    {
-    //        Vct = $"{BASE}/credentials/BootCampCredential",
-    //        Name = "BootCampCredential",
-    //        Description = "Academic transcript issued by an educational institution",
-    //        Display =
-    //        [
-    //            new()
-    //            {
-    //                Lang        = "th",
-    //                Name        = "ใบแสดงผลการเรียน",
-    //                Description = "ใบแสดงผลการเรียนที่ออกโดยสถาบันการศึกษา",
-    //                Rendering   = new()
-    //                {
-    //                    Simple = new()
-    //                    {
-    //                        Logo            = new() { Uri = $"{BASE}/assets/transcript-logo.png", AltText = "Transcript Logo" },
-    //                        BackgroundColor = "#1a3c6e",
-    //                        TextColor       = "#ffffff",
-    //                    }
-    //                }
-    //            },
-    //            new() { Lang = "en", Name = "BootCamp" }
-    //        ],
-    //        Claims =
-    //        [
-    //            Claim("student_id",       mandatory: true,  sd: true,  th: "รหัสนักศึกษา",       en: "Student ID"),
-    //            Claim("full_name",        mandatory: true,  sd: true,  th: "ชื่อ-นามสกุล",       en: "Full Name"),
-    //            Claim("faculty",          mandatory: true,  sd: true,  th: "คณะ / สาขาวิชา",      en: "Faculty / Major"),
-    //            Claim("gpa",              mandatory: false, sd: true,  th: "เกรดเฉลี่ย",          en: "GPA"),
-    //            //Claim("grades",           mandatory: false, sd: true,  th: "ผลการเรียน",          en: "Grades"),
-    //            Claim("graduation_date",  mandatory: false, sd: true,  th: "วันสำเร็จการศึกษา",   en: "Graduation Date"),
-    //            Claim("institution_name", mandatory: true,  sd: false, th: "ชื่อสถาบัน",          en: "Institution Name"),
-    //            Claim("degree",           mandatory: true,  sd: true,  th: "วุฒิการศึกษา",        en: "Degree / Qualification"),
-    //        ]
-    //    };
-
-    //    return Ok(metadata);
-    //}
+    
 
     [HttpGet("credentials/BootCampCredential")]
     [HttpGet(".well-known/vct/credentials/BootCampCredential")]
@@ -310,7 +267,7 @@ public class VctTypeMetadataController : ControllerBase
                 Claim("birthdate",   mandatory: true,  sd: true,  th: "วันเกิด",         en: "Date of Birth"),
                 Claim("address",     mandatory: true, sd: true, th: "ที่อยู่",          en: "Address"),
                 Claim("expiry_date", mandatory: true,  sd: true,  th: "วันหมดอายุ",      en: "Expiry Date"),
-                Claim("religion", mandatory: true,  sd: true,  th: "ศาสนา",         en: "Religion"),
+                // "religion" removed — DOPA doesn't send it via ThaID.
                 //Claim("photo",       mandatory: false, sd: true,  th: "รูปถ่าย",          en: "Photo"),
             ]
         };
@@ -353,13 +310,17 @@ public class VctTypeMetadataController : ControllerBase
             Claims =
             [
                 Claim("license_number",     mandatory: true,  sd: true,  th: "เลขใบขับขี่",       en: "License Number"),
-                Claim("full_name",          mandatory: true,  sd: true,  th: "ชื่อ-นามสกุล",      en: "Full Name"),
+                Claim("givenname",          mandatory: true,  sd: true,  th: "ชื่อ",      en: "GivenName"),
+                Claim("familyname",          mandatory: true,  sd: true,  th: "นามสกุล",      en: "FamilyName"),
                 Claim("birthdate",          mandatory: true,  sd: true,  th: "วันเกิด",            en: "Date of Birth"),
                 Claim("address",            mandatory: false, sd: true,  th: "ที่อยู่",             en: "Address"),
-                Claim("license_class",      mandatory: true,  sd: true,  th: "ประเภทใบขับขี่",     en: "License Class"),
+                Claim("license_type",      mandatory: true,  sd: true,  th: "ประเภทใบขับขี่",     en: "License Type"),
                 Claim("issue_date",         mandatory: true,  sd: false, th: "วันที่ออกใบขับขี่",  en: "Issue Date"),
                 Claim("expiry_date",        mandatory: true,  sd: true,  th: "วันหมดอายุ",         en: "Expiry Date"),
                 Claim("vehicle_categories", mandatory: false, sd: false, th: "ประเภทยานพาหนะ",    en: "Vehicle Categories"),
+                Claim("vehicle_categories", mandatory: false, sd: false, th: "ประเภทยานพาหนะ",    en: "Vehicle Categories"),
+               // Claim("portrait", mandatory: false, sd: false, th: "รูปถ่าย",    en: "Portrait"),
+                
             ]
         };
 

@@ -22,25 +22,39 @@ public partial class IssuerDbContext : DbContext
 
     public virtual DbSet<Dbnonce> Dbnonces { get; set; }
 
+    public virtual DbSet<Dbpresentationrequest> Dbpresentationrequests { get; set; }
+
     public virtual DbSet<Dbregister> Dbregisters { get; set; }
 
     public virtual DbSet<Dbrequest> Dbrequests { get; set; }
 
     public virtual DbSet<Dbuser> Dbusers { get; set; }
 
+    // C-06: this used to be a hardcoded connection string with a real DB host/password committed
+    // straight into source (EF scaffolding's default output — the "#warning" it generated telling
+    // us to fix this was left in place and ignored). Every call site in the app uses `new
+    // IssuerDbContext()` (parameterless) rather than DI-injected options, so OnConfiguring is the
+    // only place this can be wired up. Reads CONNECTION_STRING from the environment — the same
+    // variable name already used in Properties/launchSettings.json (dev) and docker-compose.yml's
+    // .env (prod/lab) — so no code change is needed there, only removing the fallback credential.
+    // Throws instead of silently falling back to a default so a missing/misconfigured environment
+    // fails loudly at startup rather than quietly connecting to the wrong (or no) database.
     protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
     {
-        // C-06: no hardcoded DB credential fallback. Must be supplied via CONNECTION_STRING env var.
-        // Re-running `dotnet ef dbcontext scaffold` (e.g. to pick up a new column/table) WILL
-        // overwrite this method with a literal connection string + password again — re-apply this
-        // block afterward every time, or scaffold with `--no-onconfiguring` so it's left alone.
-        var connStr = Environment.GetEnvironmentVariable("CONNECTION_STRING");
-        if (string.IsNullOrWhiteSpace(connStr))
+        if (!optionsBuilder.IsConfigured)
         {
-            throw new InvalidOperationException(
-                "CONNECTION_STRING environment variable is not set. Refusing to start with a hardcoded database credential.");
+            string connectionString = Environment.GetEnvironmentVariable("CONNECTION_STRING");
+            if (string.IsNullOrWhiteSpace(connectionString))
+            {
+                throw new InvalidOperationException(
+                    "CONNECTION_STRING environment variable is not set. Provide a MySQL connection string " +
+                    "(e.g. \"server=...;port=3306;database=issuer;user=...;password=...;sslmode=None\") via " +
+                    "the environment (see Properties/launchSettings.json for local dev, docker-compose.yml's " +
+                    ".env for containers) — there is no hardcoded fallback.");
+            }
+
+            optionsBuilder.UseMySql(connectionString, Microsoft.EntityFrameworkCore.ServerVersion.Parse("8.0.45-mysql"));
         }
-        optionsBuilder.UseMySql(connStr, Microsoft.EntityFrameworkCore.ServerVersion.Parse("8.0.45-mysql"));
     }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
@@ -67,7 +81,12 @@ public partial class IssuerDbContext : DbContext
                 .HasColumnName("issued_at");
             entity.Property(e => e.RegisterId)
                 .HasMaxLength(50)
-                .HasColumnName("register_id");
+                .HasColumnName("register_id")
+                .UseCollation("utf8mb4_general_ci");
+            entity.Property(e => e.Revoked).HasColumnName("revoked");
+            entity.Property(e => e.RevokedAt)
+                .HasColumnType("datetime")
+                .HasColumnName("revoked_at");
         });
 
         modelBuilder.Entity<Dbissuerlog>(entity =>
@@ -136,6 +155,43 @@ public partial class IssuerDbContext : DbContext
             entity.Property(e => e.Used).HasColumnName("used");
         });
 
+        modelBuilder.Entity<Dbpresentationrequest>(entity =>
+        {
+            entity.HasKey(e => e.Id).HasName("PRIMARY");
+
+            entity
+                .ToTable("dbpresentationrequest")
+                .UseCollation("utf8mb4_general_ci");
+
+            entity.HasIndex(e => e.State, "uq_presentation_state").IsUnique();
+
+            entity.Property(e => e.Id).HasColumnName("id");
+            entity.Property(e => e.State)
+                .HasMaxLength(100)
+                .HasColumnName("state");
+            entity.Property(e => e.Nonce)
+                .HasMaxLength(100)
+                .HasColumnName("nonce");
+            entity.Property(e => e.RegisterId)
+                .HasMaxLength(50)
+                .HasColumnName("register_id");
+            entity.Property(e => e.Status)
+                .HasMaxLength(20)
+                .HasColumnName("status");
+            entity.Property(e => e.VerifiedPid)
+                .HasMaxLength(50)
+                .HasColumnName("verified_pid");
+            entity.Property(e => e.FailureReason)
+                .HasMaxLength(255)
+                .HasColumnName("failure_reason");
+            entity.Property(e => e.CreateDate)
+                .HasColumnType("datetime")
+                .HasColumnName("create_date");
+            entity.Property(e => e.VerifiedAt)
+                .HasColumnType("datetime")
+                .HasColumnName("verified_at");
+        });
+
         modelBuilder.Entity<Dbregister>(entity =>
         {
             entity.HasKey(e => e.Id).HasName("PRIMARY");
@@ -161,8 +217,35 @@ public partial class IssuerDbContext : DbContext
                 .UseCollation("utf8mb4_general_ci");
 
             entity.Property(e => e.Id).HasColumnName("ID");
+            entity.Property(e => e.Address)
+                .HasMaxLength(500)
+                .HasColumnName("address");
+            entity.Property(e => e.BirthDate)
+                .HasMaxLength(20)
+                .HasColumnName("birth_date");
             entity.Property(e => e.CreateDate).HasMaxLength(6);
             entity.Property(e => e.CredentialId).HasMaxLength(1000);
+            entity.Property(e => e.DateOfExpiry)
+                .HasMaxLength(20)
+                .HasColumnName("date_of_expiry");
+            entity.Property(e => e.DateOfIssuance)
+                .HasMaxLength(20)
+                .HasColumnName("date_of_issuance");
+            entity.Property(e => e.FirstNameEn)
+                .HasMaxLength(100)
+                .HasColumnName("first_name_en");
+            entity.Property(e => e.FirstNameTh)
+                .HasMaxLength(100)
+                .HasColumnName("first_name_th");
+            entity.Property(e => e.Gender)
+                .HasMaxLength(10)
+                .HasColumnName("gender");
+            entity.Property(e => e.LastNameEn)
+                .HasMaxLength(100)
+                .HasColumnName("last_name_en");
+            entity.Property(e => e.LastNameTh)
+                .HasMaxLength(100)
+                .HasColumnName("last_name_th");
             entity.Property(e => e.RegisterId)
                 .HasMaxLength(50)
                 .IsFixedLength()
@@ -170,6 +253,15 @@ public partial class IssuerDbContext : DbContext
             entity.Property(e => e.Subject)
                 .HasMaxLength(255)
                 .HasColumnName("subject");
+            entity.Property(e => e.TitleEn)
+                .HasMaxLength(50)
+                .HasColumnName("title_en");
+            entity.Property(e => e.TitleTh)
+                .HasMaxLength(50)
+                .HasColumnName("title_th");
+            entity.Property(e => e.TxCodeHash)
+                .HasMaxLength(64)
+                .HasColumnName("tx_code_hash");
         });
 
         modelBuilder.Entity<Dbuser>(entity =>

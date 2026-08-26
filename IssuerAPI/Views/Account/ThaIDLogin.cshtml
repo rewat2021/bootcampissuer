@@ -5,6 +5,12 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>เอกสาร STANDARD VC</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <!-- เดิมหน้านี้ประกาศ font-family: "Sarabun", "Noto Sans Thai" ไว้ใน CSS แต่ไม่เคยโหลดฟอนต์จริงเลย
+         (ไม่มี <link> หรือ @@font-face ที่ไหนดึงมาให้) เบราว์เซอร์เลย fallback ไป Arial/system font แทนตลอด
+         — เพิ่ม Google Fonts เข้ามาให้ตรงกับหน้า QR (เลือก Kanit ไว้แล้ว) -->
+    <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@400;600;700;800&display=swap" rel="stylesheet" />
     <style>
         :root {
             --navy: #0a1f6b;
@@ -20,15 +26,20 @@
             box-sizing: border-box;
         }
 
+        /* ป้องกัน scrollbar ทั้งแนวตั้ง/แนวนอน: ล็อกทั้งหน้าให้พอดี viewport แล้วให้ main/login-card หดตาม
+           พื้นที่ที่เหลือแทนการปล่อยให้ min-height ดันความสูงรวมเกิน 100vh (ของเดิม overflow-x: hidden
+           อย่างเดียว ไม่ได้กันแนวตั้ง — การ์ดสูงเกิน viewport เมื่อไหร่ก็มี scrollbar แนวตั้งขึ้นทันที) */
         html,
         body {
-            overflow-x: hidden;
+            height: 100%;
+            overflow: hidden;
         }
 
         body {
-            font-family: "Sarabun", "Noto Sans Thai", Arial, sans-serif;
+            font-family: "Kanit", sans-serif;
             background: #ffffff;
-            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
         }
 
         header.topbar {
@@ -37,6 +48,7 @@
             padding: 20px 24px;
             display: flex;
             align-items: center;
+            flex-shrink: 0;
         }
 
             header.topbar h1 {
@@ -45,23 +57,29 @@
             }
 
         main {
+            flex: 1;
+            min-height: 0;
             display: flex;
             justify-content: center;
             align-items: center;
-            padding: 40px 16px;
-            min-height: calc(100vh - 76px);
+            padding: clamp(12px, 4vh, 40px) 16px;
+            overflow: hidden;
         }
 
         .login-card {
             width: 100%;
             max-width: 1003px;
+            max-height: 100%;
             border: 2px solid var(--border-blue);
             border-radius: 20px;
-            padding: 58px 32px;
+            padding: clamp(20px, 5vh, 58px) 32px;
             display: flex;
             flex-direction: column;
             align-items: center;
-            gap: 20px;
+            justify-content: center;
+            gap: clamp(10px, 2vh, 20px);
+            overflow: hidden;
+            box-sizing: border-box;
         }
 
             .login-card .title {

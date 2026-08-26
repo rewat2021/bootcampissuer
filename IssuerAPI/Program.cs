@@ -1,5 +1,6 @@
 ﻿using IssuerAPI.Service;
 using IssuerAPI.Models;
+using IssuerAPI.Databases;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.OpenApi.Models;
 using NLog;
@@ -126,6 +127,43 @@ builder.Logging.ClearProviders();
 builder.Host.UseNLog();
 
 var app = builder.Build();
+
+// C-06 follow-up: db/init.sql no longer seeds a `users` row (the old one committed a real name,
+// email, and a PLAINTEXT password to source control — see AccountController.VerifyPassword for the
+// matching BCrypt fix). That leaves a chicken-and-egg problem for a brand-new deployment: there is
+// no way to log in to create the first staff/admin account through the app itself. This runs once
+// at startup, only creates a user if the `users` table is completely empty, and only if both
+// bootstrap env vars are actually set (so it's a silent no-op on every deployment after the first).
+// Password is hashed with BCrypt before it ever touches the database — never stored/logged raw.
+try
+{
+    string bootstrapUsername = Environment.GetEnvironmentVariable("ADMIN_BOOTSTRAP_USERNAME");
+    string bootstrapPassword = Environment.GetEnvironmentVariable("ADMIN_BOOTSTRAP_PASSWORD");
+    if (!string.IsNullOrWhiteSpace(bootstrapUsername) && !string.IsNullOrWhiteSpace(bootstrapPassword))
+    {
+        using var seedContext = new IssuerDbContext();
+        if (!seedContext.Dbusers.Any())
+        {
+            seedContext.Dbusers.Add(new Dbuser
+            {
+                FirstName = "Admin",
+                LastName = "Bootstrap",
+                Username = bootstrapUsername,
+                Email = $"{bootstrapUsername}@localhost.invalid",
+                Password = BCrypt.Net.BCrypt.HashPassword(bootstrapPassword),
+                CreatedAt = DateTime.UtcNow
+            });
+            seedContext.SaveChanges();
+            logger.Info($"Admin bootstrap: created first staff user '{bootstrapUsername}' (users table was empty).");
+        }
+    }
+}
+catch (Exception ex)
+{
+    // Never let a bootstrap failure block the app from starting — worst case, no admin user exists
+    // yet and someone has to create one manually (e.g. via a direct DB insert with a BCrypt hash).
+    logger.Error(ex, "Admin bootstrap failed");
+}
 
 app.UseForwardedHeaders();
 
