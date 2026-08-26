@@ -59,7 +59,6 @@ docker compose version
 ## 2. Clone / pull โค้ดล่าสุด
 
 ```powershell
-cd C:\project\ETDA\phase_III\bootcamp_issuer
 git pull
 ```
 
