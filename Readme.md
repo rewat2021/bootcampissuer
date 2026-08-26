@@ -13,8 +13,8 @@
 | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `CONNECTION_STRING`                                     | connection string MySQL server จริงที่มีอยู่แล้ว                                                                                                  |
 | `Jwt__PrivateKey`                                       | generate เองด้วยคำสั่ง PowerShell ด้านล่าง (ข้อ 3)                                                                                                |
-| `ThaIDConfig__ClientID` / `ThaIDConfig__ClientSecret`   | ขอจาก DOPA/Chula                                                                                                                                  |
-| `ADMIN_BOOTSTRAP_USERNAME` / `ADMIN_BOOTSTRAP_PASSWORD` | ตั้งเอง — ใช้สร้างบัญชี staff/admin แรกอัตโนมัติตอน container boot ครั้งแรก ถ้าตาราง `users` ยังว่างเปล่า (ข้ามได้ถ้ามีข้อมูลอยู่แล้วจาก DB dump) |
+| `ThaIDConfig__ClientID`   | ClientID login ThaiD 
+| `ThaIDConfig__ClientSecret`   | ClientSecret ThaiD
 | `ASPNETCORE_ENVIRONMENT`                                | `Production`                                                                                                                                      |
 
 ---
