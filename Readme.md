@@ -1,122 +1,158 @@
-# ขั้นตอนติดตั้งบน Docker + Restore DB (`Dump20260826.sql`)
+# ติดตั้ง Docker + Restore Database จาก Dump20260826.sql (Issuer Service)
 
-> อ้างอิงจาก `docker-compose.yml`, `.env`, `db/init.sql` ปัจจุบันหลังแก้ C-06 (secret ทั้งหมดย้ายไป `.env`, schema เปล่า, Dockerfile เป็น .NET 9) — ดูภาพรวมเพิ่มเติมที่ `DOCKER-DEPLOYMENT-GUIDE.md`
+รองรับทั้ง Windows และ Linux — ใช้คู่กับ [`DOCKER-DEPLOYMENT-GUIDE.md`](./DOCKER-DEPLOYMENT-GUIDE.md) ข้อ 4 (Restore ข้อมูลเดิมเข้า MySQL server)
 
----
-
-## 0. เช็คให้ `.env` ครบก่อน
-
-`.env` ต้องมีค่าจริงครบทุกตัวนี้ (ไม่ใช่ค่าว่าง) ก่อนเริ่ม:
-
-| ตัวแปร | ใช้ทำอะไร |
-|---|---|
-| `CONNECTION_STRING` | ให้แอปต่อ MySQL |
-| `MYSQL_ROOT_PASSWORD` | ให้ container `issuer-mysql` สร้าง root user ตอน boot ครั้งแรก |
-| `Jwt__PrivateKey` | เซ็น access token |
-| `ThaIDConfig__ClientID` / `ThaIDConfig__ClientSecret` | login ผ่าน ThaID |
+**บริบทสำคัญ**: deployment นี้ต่อ MySQL server ภายนอกโดยตรงผ่าน `CONNECTION_STRING` ใน `.env` — ไม่มี container `issuer-mysql` ให้ restore เข้าไปแล้ว (ตัดออกจาก `docker-compose.yml`/`docker-compose.lab.yml`) ดังนั้น "restore" ในเอกสารนี้คือ import `Dump20260826.sql` เข้า MySQL server จริงที่มีอยู่แล้ว ไม่ใช่เข้า container
 
 ---
 
-## 1. วางไฟล์ dump
+## 0. เตรียมของก่อนเริ่ม
 
-วาง `Dump20260826.sql` ไว้ที่ root โปรเจกต์ (ระดับเดียวกับ `docker-compose.yml`):
-
-```
-C:\project\ETDA\phase_III\bootcamp_issuer\Dump20260826.sql
-```
-
-ไฟล์นี้มีข้อมูลจริง (production-like) — **ห้าม commit เข้า git** ระวังอย่า `git add -A` ตอนที่ไฟล์นี้ยังอยู่ในโฟลเดอร์ ลบทิ้งหรือย้ายออกหลัง restore เสร็จก็ได้
+- ไฟล์ `Dump20260826.sql`
+- ข้อมูลเชื่อมต่อ MySQL server ปลายทาง: host, port (ปกติ 3306), user, password, ชื่อฐานข้อมูล (`issuer`)
+- สิทธิ์ `CREATE`/`DROP`/`INSERT` บนฐานข้อมูลนั้น (dump มักมี `DROP TABLE IF EXISTS` นำหน้าแต่ละตาราง)
 
 ---
 
-## 2. สร้าง Docker network (ครั้งแรกครั้งเดียว)
+## 1. ติดตั้ง Docker
+
+ใช้ Docker เป็นตัวรัน MySQL client เท่านั้น (ไม่ได้รัน MySQL server เอง) — ถ้าเครื่องมี `mysql` client อยู่แล้วข้ามไปข้อ 3 ได้เลย
+
+### Windows
+
+1. ดาวน์โหลด Docker Desktop: https://www.docker.com/products/docker-desktop
+2. ติดตั้งแบบ default (เปิดใช้ WSL2 backend ตามที่ตัวติดตั้งแนะนำ)
+3. รีสตาร์ทเครื่องถ้าติดตั้งขอ
+4. เปิด Docker Desktop รอจนสถานะเป็น "Engine running"
+5. ตรวจสอบใน PowerShell:
 
 ```powershell
-docker network create lab-network
+docker --version
+docker compose version
 ```
 
-ข้ามขั้นตอนนี้ได้ถ้าเคยสร้างไว้แล้ว (`docker network ls` เช็คได้)
+### Linux (Ubuntu/Debian)
 
----
+```bash
+# ลบเวอร์ชันเก่าถ้ามี
+sudo apt-get remove docker docker-engine docker.io containerd runc
 
-## 3. Build image
+# ติดตั้งผ่าน convenience script (ใช้ได้ทั้ง Ubuntu/Debian)
+curl -fsSL https://get.docker.com -o get-docker.sh
+sudo sh get-docker.sh
 
-```powershell
-cd C:\project\ETDA\phase_III\bootcamp_issuer
-docker compose build api
-```
+# ให้ user ปัจจุบันรัน docker ได้โดยไม่ต้อง sudo (ต้อง logout/login ใหม่ 1 ครั้ง)
+sudo usermod -aG docker $USER
 
----
-
-## 4. Start เฉพาะ MySQL ก่อน
-
-```powershell
-docker compose up -d issuer-mysql
-docker compose ps
-```
-
-รอจน `issuer-mysql` ขึ้นสถานะ `healthy` (ประมาณ 30 วินาที) — ตอน boot ครั้งแรก `db/init.sql` จะรันอัตโนมัติสร้าง schema เปล่าให้ก่อน (รันแค่ครั้งเดียวตอน volume ว่างเปล่าเท่านั้น จะไม่รันซ้ำถ้ามีข้อมูลอยู่แล้ว)
-
----
-
-## 5. Restore `Dump20260826.sql` เข้าไปทับ
-
-Copy ไฟล์เข้า container ก่อนแล้วค่อย restore ข้างใน (เสถียรกว่าการ pipe ตรงๆ โดยเฉพาะไฟล์ dump ขนาดใหญ่):
-
-```powershell
-docker cp .\Dump20260826.sql issuer-mysql:/tmp/Dump20260826.sql
-docker exec issuer-mysql sh -c "mysql -uroot -p'<MYSQL_ROOT_PASSWORD ของคุณ>' issuer < /tmp/Dump20260826.sql"
-```
-
-แทน `<MYSQL_ROOT_PASSWORD ของคุณ>` ด้วยค่าจริงจาก `.env` — dump ที่ export ด้วย `mysqldump` ปกติจะมี `DROP TABLE IF EXISTS` กำกับอยู่แล้ว จึงทับ schema เปล่าจากขั้นตอนที่ 4 ได้เลยโดยไม่ error
-
-ลบไฟล์ dump ออกจาก container หลัง restore เสร็จ (ไม่จำเป็นต้องเก็บค้างไว้ข้างใน):
-
-```powershell
-docker exec issuer-mysql rm /tmp/Dump20260826.sql
+# ตรวจสอบ
+docker --version
+docker compose version
 ```
 
 ---
 
-## 6. Start ที่เหลือ (api)
+## 2. เตรียม MySQL client
 
-```powershell
-docker compose up -d
-docker compose logs -f api
+**ถ้าเครื่องมี `mysql` client อยู่แล้ว** ข้ามไปข้อ 3 ได้เลย ใช้คำสั่ง `mysql` ตรงจากเครื่องได้ทันที ไม่ต้องพึ่ง Docker
+
+**ถ้าไม่มี** ใช้ image `mysql:8.0` เป็น client ชั่วคราวแทนการติดตั้งลงเครื่องจริง (ทั้ง Windows และ Linux ใช้คำสั่งเดียวกัน เพราะรันผ่าน Docker):
+
+```bash
+docker run -it --rm mysql:8.0 mysql -h<host> -P3306 -uroot -p"<password>" issuer
 ```
 
-`api` จะรอ `issuer-mysql` healthy ก่อนถึง start เอง (ตั้งไว้ใน `depends_on: condition: service_healthy`)
+ทดสอบ login สำเร็จแล้ว `exit;` ออกมาเพื่อไป restore จริงในข้อ 3
 
 ---
 
-## 7. ตรวจสอบว่าใช้งานได้
+## 3. Restore `Dump20260826.sql` เข้า MySQL server
+
+### วิธีที่ 1 — มี `mysql` client ในเครื่องอยู่แล้ว
+
+**Windows (PowerShell)**
 
 ```powershell
-docker compose ps
-curl http://localhost:5002/.well-known/openid-credential-issuer
+cd C:\path\to\folder\ที่มี\Dump20260826.sql
+Get-Content .\Dump20260826.sql | mysql -h<host> -P3306 -uroot -p"<password>" issuer
 ```
 
-ควรได้ JSON metadata กลับมาปกติ (ไม่ error, `credential_configurations_supported` ไม่ว่างเปล่า) ลอง login ผ่านหน้าเว็บดูว่าข้อมูลเดิมจาก dump (user/request เก่า) ยังอยู่ครบ
+(ใช้ `Get-Content | mysql` แทน `<` ตรงๆ เพราะ PowerShell ตีความ `<` ต่างจาก cmd/bash)
+
+**Linux/macOS (bash)**
+
+```bash
+cd /path/to/folder-with-dump
+mysql -h<host> -P3306 -uroot -p"<password>" issuer < Dump20260826.sql
+```
+
+### วิธีที่ 2 — ไม่มี `mysql` client, ใช้ Docker แทน (Windows/Linux เหมือนกัน)
+
+mount ไฟล์ dump เข้า container แล้ว pipe เข้า `mysql` client ข้างในนั้น:
+
+```bash
+docker run -it --rm -v "$(pwd)/Dump20260826.sql:/tmp/dump.sql" mysql:8.0 \
+  sh -c 'mysql -h<host> -P3306 -uroot -p"<password>" issuer < /tmp/dump.sql'
+```
+
+PowerShell (แทน `$(pwd)` ด้วย `${PWD}`):
+
+```powershell
+docker run -it --rm -v "${PWD}/Dump20260826.sql:/tmp/dump.sql" mysql:8.0 `
+  sh -c 'mysql -h<host> -P3306 -uroot -p"<password>" issuer < /tmp/dump.sql'
+```
+
+ไม่มี error พิมพ์ออกมาแปลว่า import ผ่าน (dump มี `DROP TABLE IF EXISTS` นำหน้าทุกตาราง ดังนั้นรันซ้ำได้แต่จะเขียนทับข้อมูลเดิมในตารางที่ชนกัน)
 
 ---
 
-## หมายเหตุ — schema เก่ากว่าปัจจุบันไหม
+## 4. ตรวจสอบหลัง restore
 
-ถ้า `Dump20260826.sql` export มาจากฐานข้อมูลรุ่นเก่าที่ schema ยังไม่มีคอลัมน์ที่เพิ่มไปในเซสชันล่าสุด (เช่น `TxCodeHash`, `Address`, `DateOfIssuance`, `DateOfExpiry`, `TitleEn/FirstNameEn/LastNameEn` ในตาราง `dbrequest`, หรือตาราง `dbpresentationrequest`/`dbissuedcredential`/`dbnonce` ที่ไม่มีอยู่เลย) ต้องรัน `ALTER TABLE`/`CREATE TABLE` เพิ่มเติมหลัง restore เสร็จ ไม่งั้นฟีเจอร์ tx_code / OID4VP verifier / status list revocation จะ error เพราะหาคอลัมน์/ตารางไม่เจอ — ขอ SQL migration ชุดที่ตรงกับ schema ปัจจุบันได้ถ้าต้องการ
+เช็คว่าตารางครบและแอปใช้งานได้จริง — schema ปัจจุบันที่แอปต้องการมี 7 ตาราง:
+
+```sql
+USE issuer;
+SHOW TABLES;
+```
+
+ควรเห็นครบ: `dbissuedcredential`, `dbissuerlog`, `dbnonce`, `dbregister`, `dbrequest`, `dbusers`
+
+ตรวจ row count คร่าวๆ ว่ามีข้อมูลจริง ไม่ใช่ตารางว่าง:
+
+```sql
+SELECT COUNT(*) FROM dbregister;
+SELECT COUNT(*) FROM dbusers;
+SELECT COUNT(*) FROM dbrequest;
+```
+
+---
+
+## 5. ชี้แอปให้ต่อ DB ที่เพิ่ง restore
+
+แก้ `CONNECTION_STRING` ใน `.env` (root ของโปรเจกต์) ให้ชี้ไปที่ host/port/user/password/database ที่ restore ไว้ในข้อ 3:
+
+```
+CONNECTION_STRING=server=<host>;port=3306;database=issuer;user=root;password=<password>;sslmode=None
+```
+
+จากนั้น build/start container ตามลำดับใน `DOCKER-DEPLOYMENT-GUIDE.md` ข้อ 5-7 (`docker compose build api` → `docker compose up -d` → เช็ค `curl http://localhost:5002/.well-known/openid-credential-issuer`)
 
 ---
 
 ## สรุปคำสั่งทั้งหมด (ไล่ตามลำดับ)
 
-```powershell
-cd C:\project\ETDA\phase_III\bootcamp_issuer
-docker network create lab-network              # ครั้งแรกครั้งเดียว
+```bash
+# 1. ติดตั้ง Docker (Windows: Docker Desktop / Linux: get.docker.com script) — ข้ามถ้ามีแล้ว
+
+# 2. restore dump (เลือกวิธีที่มี mysql client หรือใช้ Docker เป็น client)
+mysql -h<host> -P3306 -uroot -p"<password>" issuer < Dump20260826.sql
+
+# 3. ตรวจตารางครบ 7 ตาราง โดยเฉพาะ dbpresentationrequest
+mysql -h<host> -P3306 -uroot -p"<password>" -e "USE issuer; SHOW TABLES;"
+
+# 4. แก้ .env -> CONNECTION_STRING ให้ชี้ไป host เดียวกัน
+
+# 5. build + start (ดู DOCKER-DEPLOYMENT-GUIDE.md ข้อ 5-7)
 docker compose build api
-docker compose up -d issuer-mysql
-docker compose ps                               # รอ healthy
-docker cp .\Dump20260826.sql issuer-mysql:/tmp/Dump20260826.sql
-docker exec issuer-mysql sh -c "mysql -uroot -p'<MYSQL_ROOT_PASSWORD>' issuer < /tmp/Dump20260826.sql"
-docker exec issuer-mysql rm /tmp/Dump20260826.sql
 docker compose up -d
 docker compose logs -f api
 ```
