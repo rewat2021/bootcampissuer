@@ -1,22 +1,27 @@
-# ติดตั้ง Docker + Restore Database จาก Dump20260826.sql (Issuer Service)
+# คู่มือ Deploy บน Docker — Issuer Service 
 
-รองรับทั้ง Windows และ Linux — ใช้คู่กับ [`DOCKER-DEPLOYMENT-GUIDE.md`](./DOCKER-DEPLOYMENT-GUIDE.md) ข้อ 4 (Restore ข้อมูลเดิมเข้า MySQL server)
-
-**บริบทสำคัญ**: deployment นี้ต่อ MySQL server ภายนอกโดยตรงผ่าน `CONNECTION_STRING` ใน `.env` — ไม่มี container `issuer-mysql` ให้ restore เข้าไปแล้ว (ตัดออกจาก `docker-compose.yml`/`docker-compose.lab.yml`) ดังนั้น "restore" ในเอกสารนี้คือ import `Dump20260826.sql` เข้า MySQL server จริงที่มีอยู่แล้ว ไม่ใช่เข้า container
+เอกสารนี้รวมขั้นตอนติดตั้ง Docker (Windows/Linux) และ restore database จาก dump เข้าไว้ในที่เดียวแล้ว
 
 ---
 
 ## 0. เตรียมของก่อนเริ่ม
 
-- ไฟล์ `Dump20260826.sql`
-- ข้อมูลเชื่อมต่อ MySQL server ปลายทาง: host, port (ปกติ 3306), user, password, ชื่อฐานข้อมูล (`issuer`)
-- สิทธิ์ `CREATE`/`DROP`/`INSERT` บนฐานข้อมูลนั้น (dump มักมี `DROP TABLE IF EXISTS` นำหน้าแต่ละตาราง)
+- มี MySQL server ที่ใช้งานได้อยู่แล้ว (ไม่ใช่ container ที่ compose สร้าง — ตัดออกไปแล้ว)
+- ไฟล์ `.env` ที่ root โปรเจกต์ (อยู่คู่กับ `docker-compose.yml`) — **ต้องกรอกค่าจริงให้ครบก่อนเริ่ม** ไม่งั้น container start ได้แต่ endpoint หลักพัง
+
+| ตัวแปร                                                  | มาจากไหน                                                                                                                                          |
+| ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CONNECTION_STRING`                                     | connection string MySQL server จริงที่มีอยู่แล้ว                                                                                                  |
+| `Jwt__PrivateKey`                                       | generate เองด้วยคำสั่ง PowerShell ด้านล่าง (ข้อ 3)                                                                                                |
+| `ThaIDConfig__ClientID` / `ThaIDConfig__ClientSecret`   | ขอจาก DOPA/Chula                                                                                                                                  |
+| `ADMIN_BOOTSTRAP_USERNAME` / `ADMIN_BOOTSTRAP_PASSWORD` | ตั้งเอง — ใช้สร้างบัญชี staff/admin แรกอัตโนมัติตอน container boot ครั้งแรก ถ้าตาราง `users` ยังว่างเปล่า (ข้ามได้ถ้ามีข้อมูลอยู่แล้วจาก DB dump) |
+| `ASPNETCORE_ENVIRONMENT`                                | `Production`                                                                                                                                      |
 
 ---
 
 ## 1. ติดตั้ง Docker
 
-ใช้ Docker เป็นตัวรัน MySQL client เท่านั้น (ไม่ได้รัน MySQL server เอง) — ถ้าเครื่องมี `mysql` client อยู่แล้วข้ามไปข้อ 3 ได้เลย
+ข้ามข้อนี้ได้ถ้าเครื่องมี Docker + Docker Compose (v2 ขึ้นไป) อยู่แล้ว
 
 ### Windows
 
@@ -51,43 +56,60 @@ docker compose version
 
 ---
 
-## 2. เตรียม MySQL client
+## 2. Clone / pull โค้ดล่าสุด
 
-**ถ้าเครื่องมี `mysql` client อยู่แล้ว** ข้ามไปข้อ 3 ได้เลย ใช้คำสั่ง `mysql` ตรงจากเครื่องได้ทันที ไม่ต้องพึ่ง Docker
+```powershell
+cd C:\project\ETDA\phase_III\bootcamp_issuer
+git pull
+```
 
-**ถ้าไม่มี** ใช้ image `mysql:8.0` เป็น client ชั่วคราวแทนการติดตั้งลงเครื่องจริง (ทั้ง Windows และ Linux ใช้คำสั่งเดียวกัน เพราะรันผ่าน Docker):
+---
+
+## 3. สร้าง Docker network (ถ้ายังไม่มี)
+
+```powershell
+docker network create lab-network
+```
+
+---
+
+## 4. Restore ข้อมูลเดิมเข้า MySQL server
+
+**บริบท**: deployment นี้ต่อ MySQL server ภายนอกโดยตรงผ่าน `CONNECTION_STRING` ใน `.env` — ไม่มี container `issuer-mysql` ให้ restore เข้าไปแล้ว ดังนั้น "restore" คือ import dump เข้า MySQL server จริงที่มีอยู่แล้ว ไม่ใช่เข้า container
+
+เตรียมของ: ไฟล์ dump (เช่น `Dump20260826.sql`), host/port/user/password ของ MySQL server ปลายทาง, สิทธิ์ `CREATE`/`DROP`/`INSERT` บนฐานข้อมูล `issuer`
+
+### 4.1 เตรียม MySQL client
+
+ถ้าเครื่องมี `mysql` client อยู่แล้ว ข้ามไป 5.2 ได้เลย ใช้คำสั่ง `mysql` ตรงจากเครื่องได้ทันที
+
+ถ้าไม่มี ใช้ image `mysql:8.0` เป็น client ชั่วคราวแทน (Windows/Linux ใช้คำสั่งเดียวกันเพราะรันผ่าน Docker):
 
 ```bash
 docker run -it --rm mysql:8.0 mysql -h<host> -P3306 -uroot -p"<password>" issuer
 ```
 
-ทดสอบ login สำเร็จแล้ว `exit;` ออกมาเพื่อไป restore จริงในข้อ 3
+ทดสอบ login สำเร็จแล้ว `exit;` ออกมาเพื่อไป restore จริง
 
----
+### 4.2 Restore dump
 
-## 3. Restore `Dump20260826.sql` เข้า MySQL server
-
-### วิธีที่ 1 — มี `mysql` client ในเครื่องอยู่แล้ว
-
-**Windows (PowerShell)**
+**มี `mysql` client ในเครื่อง — Windows (PowerShell)**
 
 ```powershell
-cd C:\path\to\folder\ที่มี\Dump20260826.sql
+cd C:\path\to\folder\ที่มีไฟล์ dump
 Get-Content .\Dump20260826.sql | mysql -h<host> -P3306 -uroot -p"<password>" issuer
 ```
 
 (ใช้ `Get-Content | mysql` แทน `<` ตรงๆ เพราะ PowerShell ตีความ `<` ต่างจาก cmd/bash)
 
-**Linux/macOS (bash)**
+**มี `mysql` client ในเครื่อง — Linux/macOS (bash)**
 
 ```bash
 cd /path/to/folder-with-dump
 mysql -h<host> -P3306 -uroot -p"<password>" issuer < Dump20260826.sql
 ```
 
-### วิธีที่ 2 — ไม่มี `mysql` client, ใช้ Docker แทน (Windows/Linux เหมือนกัน)
-
-mount ไฟล์ dump เข้า container แล้ว pipe เข้า `mysql` client ข้างในนั้น:
+**ไม่มี `mysql` client — ใช้ Docker แทน (Windows/Linux เหมือนกัน)**
 
 ```bash
 docker run -it --rm -v "$(pwd)/Dump20260826.sql:/tmp/dump.sql" mysql:8.0 \
@@ -103,18 +125,14 @@ docker run -it --rm -v "${PWD}/Dump20260826.sql:/tmp/dump.sql" mysql:8.0 `
 
 ไม่มี error พิมพ์ออกมาแปลว่า import ผ่าน (dump มี `DROP TABLE IF EXISTS` นำหน้าทุกตาราง ดังนั้นรันซ้ำได้แต่จะเขียนทับข้อมูลเดิมในตารางที่ชนกัน)
 
----
-
-## 4. ตรวจสอบหลัง restore
-
-เช็คว่าตารางครบและแอปใช้งานได้จริง — schema ปัจจุบันที่แอปต้องการมี 7 ตาราง:
+### 4.3 ตรวจสอบหลัง restore
 
 ```sql
 USE issuer;
 SHOW TABLES;
 ```
 
-ควรเห็นครบ: `dbissuedcredential`, `dbissuerlog`, `dbnonce`, `dbregister`, `dbrequest`, `dbusers`
+schema ปัจจุบันที่แอปต้องการมี 7 ตาราง ควรเห็นครบ: `dbissuedcredential`, `dbissuerlog`, `dbnonce`, `dbpresentationrequest`, `dbregister`, `dbrequest`, `dbusers`
 
 ตรวจ row count คร่าวๆ ว่ามีข้อมูลจริง ไม่ใช่ตารางว่าง:
 
@@ -124,34 +142,72 @@ SELECT COUNT(*) FROM dbusers;
 SELECT COUNT(*) FROM dbrequest;
 ```
 
----
+### 4.4 กรณี deploy ใหม่ ไม่มี dump ให้ restore
 
-## 5. ชี้แอปให้ต่อ DB ที่เพิ่ง restore
+รัน `db/init.sql` เองครั้งเดียวเพื่อสร้าง schema เปล่า (ไม่มี container คอยรันให้อัตโนมัติอีกต่อไปเพราะตัด `issuer-mysql` ออกแล้ว ไม่มี seed data ตาม C-06):
 
-แก้ `CONNECTION_STRING` ใน `.env` (root ของโปรเจกต์) ให้ชี้ไปที่ host/port/user/password/database ที่ restore ไว้ในข้อ 3:
+```powershell
+mysql -h<host> -P3306 -uroot -p"<password>" < db\init.sql
+```
+
+ไฟล์นี้ schema สอดคล้องกับ dump ปัจจุบันอยู่แล้วรวม `dbpresentationrequest` ด้วย ไม่ต้องเทียบเองอีก
+
+### 4.5 ชี้แอปให้ต่อ DB ที่เพิ่ง restore
+
+แก้ `CONNECTION_STRING` ใน `.env` ให้ชี้ไปที่ host/port/user/password/database ที่ restore ไว้ข้างต้น:
 
 ```
 CONNECTION_STRING=server=<host>;port=3306;database=issuer;user=root;password=<password>;sslmode=None
 ```
 
-จากนั้น build/start container ตามลำดับใน `DOCKER-DEPLOYMENT-GUIDE.md` ข้อ 5-7 (`docker compose build api` → `docker compose up -d` → เช็ค `curl http://localhost:5002/.well-known/openid-credential-issuer`)
+---
+
+## 5. Build image
+
+```powershell
+docker compose build api
+```
+
+---
+
+## 6. Start
+
+```powershell
+docker compose up -d
+docker compose logs -f api
+```
+
+**ตอน boot ครั้งแรก**: ถ้าตั้ง `ADMIN_BOOTSTRAP_USERNAME`/`ADMIN_BOOTSTRAP_PASSWORD` ไว้ใน `.env` และตาราง `users` ยังว่างเปล่า แอปจะสร้างบัญชี staff/admin แรกให้อัตโนมัติ ใช้ login ที่ `/Account/Login` ได้เลย
+
+---
+
+## 7. ตรวจสอบว่าใช้งานได้
+
+```powershell
+docker compose ps
+docker compose logs -f api
+curl http://localhost:5002/.well-known/openid-credential-issuer
+```
+
+ควรได้ JSON metadata กลับมา (ไม่ใช่ error หรือ `credential_configurations_supported` ว่างเปล่า)
 
 ---
 
 ## สรุปคำสั่งทั้งหมด (ไล่ตามลำดับ)
 
-```bash
-# 1. ติดตั้ง Docker (Windows: Docker Desktop / Linux: get.docker.com script) — ข้ามถ้ามีแล้ว
+```powershell
+# 1. ติดตั้ง Docker (ข้ามถ้ามีแล้ว) — Windows: Docker Desktop / Linux: get.docker.com script
 
-# 2. restore dump (เลือกวิธีที่มี mysql client หรือใช้ Docker เป็น client)
+# 2. clone/pull
+git pull
+docker network create lab-network          # ครั้งแรกครั้งเดียว
+# แก้ .env ให้ครบก่อน (CONNECTION_STRING, Jwt__PrivateKey, ThaIDConfig, ADMIN_BOOTSTRAP_*)
+
+# 3. restore dump (ถ้ามี) หรือรัน db/init.sql (ถ้า deploy ใหม่)
 mysql -h<host> -P3306 -uroot -p"<password>" issuer < Dump20260826.sql
+mysql -h<host> -P3306 -uroot -p"<password>" -e "USE issuer; SHOW TABLES;"   # ตรวจครบ 7 ตาราง
 
-# 3. ตรวจตารางครบ 7 ตาราง โดยเฉพาะ dbpresentationrequest
-mysql -h<host> -P3306 -uroot -p"<password>" -e "USE issuer; SHOW TABLES;"
-
-# 4. แก้ .env -> CONNECTION_STRING ให้ชี้ไป host เดียวกัน
-
-# 5. build + start (ดู DOCKER-DEPLOYMENT-GUIDE.md ข้อ 5-7)
+# 4. build + start
 docker compose build api
 docker compose up -d
 docker compose logs -f api
