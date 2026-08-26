@@ -17,19 +17,31 @@ USE `issuer`;
 /*!40101 SET @OLD_SQL_MODE=@@SQL_MODE, SQL_MODE='NO_AUTO_VALUE_ON_ZERO' */;
 /*!40111 SET @OLD_SQL_NOTES=@@SQL_NOTES, SQL_NOTES=0 */;
 
--- C-06: this file used to seed docker's first-run MySQL init with real captured data — full issued
--- VCs (with real selective-disclosure secrets) in `dbissuerlog`, live pre-authorized_code JWTs in
--- `dbrequest`, and a real person's name/email with a plaintext password in `users`. All of that has
--- been stripped. This script now only creates empty table structures, matching what a genuinely
--- fresh deployment should start from. See M-04 note below re: schema drift.
+-- Schema sourced from Dump20260826.sql (schema-only export, no data rows — matches the current live
+-- database's structure, which is why it fixed the `dbusers` vs old `users` table-name mismatch this
+-- file used to have). `dbpresentationrequest` was added below since that table postdates the dump
+-- (new in this session, backs PresentationController's OID4VP verifier feature) and isn't in the
+-- exported file. No INSERT statements anywhere in this file by design (C-06) — this creates empty
+-- tables only, never seed real/production-like data here.
+
 --
--- NOTE (M-04, not fixed here): this schema is older than the live EF model in
--- IssuerAPI/Databases/IssuerDbContext.cs — it predates several columns added this session
--- (dbrequest: Address/DateOfIssuance/DateOfExpiry/TitleEn/FirstNameEn/LastNameEn/TxCodeHash/Subject
--- /TitleTh/FirstNameTh/LastNameTh/BirthDate/Gender) and is missing entire tables the app now uses
--- (dbissuedcredential, dbnonce, dbpresentationrequest). Treat this file as a starting point for a
--- brand new empty database only — for an existing deployment, apply the actual EF migrations
--- instead of re-running this script.
+-- Table structure for table `dbissuedcredential`
+--
+
+DROP TABLE IF EXISTS `dbissuedcredential`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!50503 SET character_set_client = utf8mb4 */;
+CREATE TABLE `dbissuedcredential` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `register_id` varchar(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL,
+  `credential_configuration_id` varchar(200) NOT NULL,
+  `issued_at` datetime DEFAULT CURRENT_TIMESTAMP,
+  `revoked` tinyint(1) NOT NULL DEFAULT '0',
+  `revoked_at` datetime DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_grant_config` (`register_id`,`credential_configuration_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
 
 --
 -- Table structure for table `dbissuerlog`
@@ -55,6 +67,46 @@ CREATE TABLE `dbissuerlog` (
   KEY `idx_status` (`status`),
   KEY `idx_created` (`created_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+
+--
+-- Table structure for table `dbnonce`
+--
+
+DROP TABLE IF EXISTS `dbnonce`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!50503 SET character_set_client = utf8mb4 */;
+CREATE TABLE `dbnonce` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `nonce` varchar(100) NOT NULL,
+  `expires_at` datetime NOT NULL,
+  `used` tinyint(1) NOT NULL DEFAULT '0',
+  `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_nonce` (`nonce`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+
+--
+-- Table structure for table `dbpresentationrequest`
+--
+
+DROP TABLE IF EXISTS `dbpresentationrequest`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!50503 SET character_set_client = utf8mb4 */;
+CREATE TABLE `dbpresentationrequest` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `state` varchar(100) NOT NULL,
+  `nonce` varchar(100) NOT NULL,
+  `register_id` varchar(50) DEFAULT NULL,
+  `status` varchar(20) NOT NULL DEFAULT 'pending',
+  `verified_pid` varchar(50) DEFAULT NULL,
+  `failure_reason` varchar(255) DEFAULT NULL,
+  `create_date` datetime DEFAULT NULL,
+  `verified_at` datetime DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_presentation_state` (`state`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
@@ -87,21 +139,34 @@ DROP TABLE IF EXISTS `dbrequest`;
 CREATE TABLE `dbrequest` (
   `ID` int NOT NULL AUTO_INCREMENT,
   `RegisterID` char(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL,
-  `CredentialId` char(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL,
+  `CredentialId` varchar(1000) COLLATE utf8mb4_general_ci NOT NULL,
   `CreateDate` datetime(6) DEFAULT NULL,
   `PreAuthorizedCode` longtext COLLATE utf8mb4_general_ci,
+  `subject` varchar(255) COLLATE utf8mb4_general_ci DEFAULT NULL,
+  `title_th` varchar(50) COLLATE utf8mb4_general_ci DEFAULT NULL,
+  `first_name_th` varchar(100) COLLATE utf8mb4_general_ci DEFAULT NULL,
+  `last_name_th` varchar(100) COLLATE utf8mb4_general_ci DEFAULT NULL,
+  `birth_date` varchar(20) COLLATE utf8mb4_general_ci DEFAULT NULL,
+  `gender` varchar(10) COLLATE utf8mb4_general_ci DEFAULT NULL,
+  `address` varchar(500) COLLATE utf8mb4_general_ci DEFAULT NULL,
+  `date_of_issuance` varchar(20) COLLATE utf8mb4_general_ci DEFAULT NULL,
+  `date_of_expiry` varchar(20) COLLATE utf8mb4_general_ci DEFAULT NULL,
+  `title_en` varchar(50) COLLATE utf8mb4_general_ci DEFAULT NULL,
+  `first_name_en` varchar(100) COLLATE utf8mb4_general_ci DEFAULT NULL,
+  `last_name_en` varchar(100) COLLATE utf8mb4_general_ci DEFAULT NULL,
+  `tx_code_hash` varchar(64) COLLATE utf8mb4_general_ci DEFAULT NULL,
   PRIMARY KEY (`ID`) USING BTREE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
--- Table structure for table `users`
+-- Table structure for table `dbusers`
 --
 
-DROP TABLE IF EXISTS `users`;
+DROP TABLE IF EXISTS `dbusers`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
 /*!50503 SET character_set_client = utf8mb4 */;
-CREATE TABLE `users` (
+CREATE TABLE `dbusers` (
   `id` int NOT NULL AUTO_INCREMENT,
   `first_name` varchar(100) DEFAULT NULL,
   `last_name` varchar(100) DEFAULT NULL,
@@ -115,12 +180,10 @@ CREATE TABLE `users` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
--- C-06 / staff login: no seed row here on purpose (the old one committed a real person's name,
--- email, and a PLAINTEXT password to source control). `password` now must hold a BCrypt hash (see
--- AccountController.VerifyPassword) — create the first admin user out-of-band after deploy, e.g.:
---   INSERT INTO users (first_name, last_name, username, email, password)
---   VALUES ('Admin', 'User', 'admin', 'admin@example.com', '<BCrypt hash — generate with
---   BCrypt.Net.BCrypt.HashPassword("your-password"), never commit the plaintext or the hash here>');
+-- C-06 / staff login: no seed row here on purpose. `password` must hold a BCrypt hash (see
+-- AccountController.VerifyPassword) — create the first admin user via the ADMIN_BOOTSTRAP_USERNAME/
+-- ADMIN_BOOTSTRAP_PASSWORD env vars (Program.cs auto-creates it on first boot if this table is
+-- empty), or insert manually with a BCrypt hash generated via BCrypt.Net.BCrypt.HashPassword(...).
 
 /*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;
 
